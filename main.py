@@ -53,26 +53,24 @@ class ComponentComparatorAI:
         self.spec_sheet_2_text = None
         self.spec_sheet_2_image_paths = []
 
-        self.model = None # Stores the initialized GenerativeModel instance
-        self.chat_session = None # Stores the current chat session with the AI
-        self.conversation_log = [] # Internal list to store conversation strings for download
-        self.api_key_configured = False # Flag to track API key status
+        self.model = None
+        self.chat_session = None
+        self.conversation_log = []
+        self.api_key_configured = False
+        self.model_options_list = [] # Initialize model options list
 
-        self.temp_image_dir = "temp_images" # Folder for storing extracted images temporarily
+        self.temp_image_dir = "temp_images"
         if not os.path.exists(self.temp_image_dir):
             try:
                 os.makedirs(self.temp_image_dir)
             except OSError as e:
                 error_message = f"Critical Error: Cannot create temporary directory {self.temp_image_dir}: {e}"
                 print(error_message)
-                # Note: update_conversation_history might not be safe to call if UI isn't fully up.
 
         self._setup_ui(root)
         self._configure_ai()
-        # Attempt to initialize the default selected model at startup if API key is present.
-        # This makes the app ready for processing if files are loaded immediately.
         if self.api_key_configured:
-            self._initialize_model() # Uses current combobox selection (the default)
+            self._initialize_model()
 
 
     def _setup_ui(self, root):
@@ -92,7 +90,7 @@ class ComponentComparatorAI:
         self.model_var = tk.StringVar()
         self.model_combobox = ttk.Combobox(root, textvariable=self.model_var, state="readonly")
 
-        model_options = [
+        self.model_options_list = [ # Assign to instance variable
             "models/gemini-1.0-pro-vision-latest", "models/gemini-pro-vision",
             "models/gemini-1.5-flash-latest", "models/gemini-1.5-flash",
             "models/gemini-1.5-flash-002", "models/gemini-1.5-flash-8b",
@@ -108,8 +106,13 @@ class ComponentComparatorAI:
             "models/gemma-3-4b-it", "models/gemma-3-12b-it",
             "models/gemma-3-27b-it", "models/gemma-3n-e4b-it"
         ]
-        self.model_combobox['values'] = model_options
-        if model_options: self.model_combobox.current(0)
+        self.model_combobox['values'] = self.model_options_list
+        if self.model_options_list:
+            self.model_combobox.current(0)
+        else:
+            print("Error: model_options_list is empty. Cannot set default Combobox selection.")
+            self.model_combobox.set("No models available")
+
         self.model_combobox.grid(row=2, column=1, padx=5, pady=5, sticky="ew")
         self.model_combobox.bind("<<ComboboxSelected>>", self._on_model_selected)
 
@@ -158,7 +161,7 @@ class ComponentComparatorAI:
             self.conversation_history.insert(tk.END, message + "\n")
             self.conversation_history.see(tk.END)
             self.conversation_history.config(state=tk.DISABLED)
-        if not is_internal_log_message: # Control what goes to downloadable log if needed
+        if not is_internal_log_message:
             self.conversation_log.append(message)
 
     def _update_ui_for_ai_status(self, api_key_configured=None, model_initialized=None):
@@ -188,22 +191,37 @@ class ComponentComparatorAI:
 
     def _on_model_selected(self, event=None):
         selected_model_name = self.model_var.get()
-        model_initialized_successfully = self._initialize_model(selected_model_name)
-        if model_initialized_successfully: # Only proceed if model init was good
-            self.check_and_process_spec_sheets() # This will check if files are loaded
+        model_initialized_successfully = self._initialize_model(selected_model_name) # Pass explicit name
+        if model_initialized_successfully:
+            self.check_and_process_spec_sheets()
 
     def _initialize_model(self, model_name=None):
-        if not model_name: model_name = self.model_var.get()
+        # Determine the source of model_name and log it
+        if model_name is None:
+            fetched_model_name = self.model_combobox.get()
+            self.update_conversation_history(f"System: _initialize_model called without explicit model_name. Fetched from Combobox: '{fetched_model_name}'")
+            model_name = fetched_model_name # Use the fetched name
+        else:
+            self.update_conversation_history(f"System: _initialize_model called with explicit model_name: '{model_name}'")
+
+        # Validate the obtained model_name against the instance's model_options_list
+        if not model_name or model_name not in self.model_options_list:
+            self.update_conversation_history(f"System: Invalid or empty model name ('{model_name}') for initialization. Available options: {len(self.model_options_list)}. Initialization aborted.")
+            self.model = None
+            self.chat_session = None
+            self._update_ui_for_ai_status(model_initialized=False)
+            return False
+
+        # Proceed if model_name is valid
         if self.model and self.model.model_name == model_name and self.api_key_configured:
             self._update_ui_for_ai_status(model_initialized=True); return True
-        if not model_name:
-            self.update_conversation_history("System: No AI model name selected for initialization.")
-            self._update_ui_for_ai_status(model_initialized=False); return False
+
         if not self.api_key_configured:
             self.update_conversation_history("System: Cannot initialize model - API key not configured.")
+            self.model = None; self.chat_session = None # Ensure reset
             self._update_ui_for_ai_status(model_initialized=False); return False
 
-        self.update_conversation_history(f"System: Initializing AI model: {model_name}...")
+        self.update_conversation_history(f"System: Attempting to initialize AI model: {model_name}...")
         try:
             self.model = genai.GenerativeModel(model_name); self.chat_session = None
             self.update_conversation_history(f"System: Successfully initialized AI model: {model_name}")
@@ -256,12 +274,14 @@ class ComponentComparatorAI:
     def clear_all(self):
         self.spec_sheet_1_label.config(text="File 1: None"); self.spec_sheet_1_path = None; self.spec_sheet_1_text = None; self.spec_sheet_1_image_paths = []
         self.spec_sheet_2_label.config(text="File 2: None"); self.spec_sheet_2_path = None; self.spec_sheet_2_text = None; self.spec_sheet_2_image_paths = []
-        self.model_combobox.current(0); current_model_name = self.model_var.get() # Get before resetting self.model
+        if self.model_options_list: self.model_combobox.current(0) # Reset to first option if list exists
+        else: self.model_combobox.set("") # Clear if no options
+        current_model_name_before_reset = self.model_var.get() # Get before self.model is None
         self.model = None; self.chat_session = None; self.conversation_log = []
         if hasattr(self, 'conversation_history'): self.conversation_history.config(state=tk.NORMAL); self.conversation_history.delete(1.0, tk.END)
         self._configure_ai()
-        if self.api_key_configured: self._initialize_model(current_model_name) # Re-initialize default/selected model
-        else: self._update_ui_for_ai_status(model_initialized=False) # Ensure UI reflects no model if no API key
+        if self.api_key_configured: self._initialize_model(current_model_name_before_reset)
+        else: self._update_ui_for_ai_status(model_initialized=False)
         if hasattr(self, 'user_input_entry'): self.user_input_entry.delete(0, tk.END)
         try:
             if os.path.exists(self.temp_image_dir): shutil.rmtree(self.temp_image_dir)
@@ -300,39 +320,27 @@ class ComponentComparatorAI:
         except Exception as e: self.update_conversation_history(f"System: Error extracting images from {os.path.basename(filepath)}: {e}"); return []
 
     def check_and_process_spec_sheets(self):
-        """Central gatekeeper for initiating automated analysis."""
-        if not (self.spec_sheet_1_path and self.spec_sheet_2_path):
-            # This message might be too early if only one file is loaded.
-            # Consider if message is needed here or if UI state is enough.
-            # self.update_conversation_history("System: Please load both spec sheets to start analysis.")
-            return
-
+        if not (self.spec_sheet_1_path and self.spec_sheet_2_path): return
         self.update_conversation_history("System: Both spec sheets loaded. Verifying AI model status...")
-        # Clear previous analysis results and log before starting a new one
         self.conversation_log = []
         if hasattr(self, 'conversation_history'):
             self.conversation_history.config(state=tk.NORMAL); self.conversation_history.delete(1.0, tk.END)
-
-        self._configure_ai() # Ensure API key status is fresh
+        self._configure_ai()
         if not self.api_key_configured:
             self.update_conversation_history("System: API Key not configured. Cannot process specs."); return
-
-        if not self.model: # If no model is active (e.g. startup before default init, or after clear all)
-            self.update_conversation_history("System: No AI model initialized. Attempting to initialize default/selected model...")
-            if not self._initialize_model(): # Try with current combobox selection
-                self.update_conversation_history("System: AI model initialization failed. Please select a model and ensure API key is set to process specs.")
+        if not self.model:
+            self.update_conversation_history("System: No AI model active. Attempting to initialize from selection...")
+            if not self._initialize_model():
+                self.update_conversation_history("System: AI model initialization failed. Please select a model or ensure API key is correct to process specs.")
                 return
-
-        # At this point, both files are loaded, API key is configured, and a model should be initialized.
         self.process_spec_sheets()
 
-
     def process_spec_sheets(self):
-        if not self.model: # Should be caught by check_and_process_spec_sheets
+        if not self.model:
             self.update_conversation_history("System: Critical - process_spec_sheets called without initialized model.")
             if not self._initialize_model(): self._update_ui_for_ai_status(model_initialized=False); return
         if not self.spec_sheet_1_path or not self.spec_sheet_2_path or not self.api_key_configured:
-            self.update_conversation_history("System: Pre-requisites for processing not met (files, API key, or model)."); return
+            self.update_conversation_history("System: Pre-requisites not met for processing (files, API key, or model)."); return
 
         self.update_conversation_history("System: Starting analysis of spec sheets...")
         self.spec_sheet_1_text = self.extract_text_from_pdf(self.spec_sheet_1_path)
@@ -347,7 +355,7 @@ class ComponentComparatorAI:
 
         summary_msg = (f"System: Analysis inputs:\n- Spec 1: {os.path.basename(self.spec_sheet_1_path)} ({len(self.spec_sheet_1_image_paths)} images)\n"
                        f"- Spec 2: {os.path.basename(self.spec_sheet_2_path)} ({len(self.spec_sheet_2_image_paths)} images)")
-        self.update_conversation_history(summary_msg, is_internal_log_message=True) # Log summary internally
+        self.update_conversation_history(summary_msg, is_internal_log_message=True)
 
         prompt_parts = ["You are an expert electronics component analyst...", "\n--- Spec Sheet 1 Text ---", self.spec_sheet_1_text]
         for img_path in self.spec_sheet_1_image_paths:
