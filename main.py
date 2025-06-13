@@ -27,6 +27,7 @@ except ImportError:
 
 from PIL import Image, ImageTk, UnidentifiedImageError # Pillow for image handling
 import docx # For downloading history
+from dotenv import load_dotenv # For loading .env files
 
 class ComponentComparatorAI:
     """
@@ -43,9 +44,13 @@ class ComponentComparatorAI:
         """
         self.root = root
         self.root.title("Component Comparator AI")
-        self.root.geometry("850x700") # Set a default window size
+        self.root.geometry("850x700")
 
-        # --- Internal State Variables ---
+        if load_dotenv():
+            print("DEBUG: Loaded environment variables from .env file.")
+        else:
+            print("DEBUG: No .env file found or python-dotenv not available/failed to load.")
+
         self.spec_sheet_1_path = None
         self.spec_sheet_1_text = None
         self.spec_sheet_1_image_paths = []
@@ -57,20 +62,23 @@ class ComponentComparatorAI:
         self.chat_session = None
         self.conversation_log = []
         self.api_key_configured = False
-        self.model_options_list = [] # Initialize model options list
+        self.model_options_list = []
 
         self.temp_image_dir = "temp_images"
         if not os.path.exists(self.temp_image_dir):
-            try:
-                os.makedirs(self.temp_image_dir)
-            except OSError as e:
-                error_message = f"Critical Error: Cannot create temporary directory {self.temp_image_dir}: {e}"
-                print(error_message)
+            try: os.makedirs(self.temp_image_dir)
+            except OSError as e: print(f"Critical Error: Cannot create temporary directory {self.temp_image_dir}: {e}")
 
         self._setup_ui(root)
         self._configure_ai()
+
         if self.api_key_configured:
             self._initialize_model()
+        else:
+            self.update_conversation_history(
+                "System: GOOGLE_API_KEY not found. Please set it in a .env file or as an environment variable to use AI features."
+            )
+            self._update_ui_for_ai_status(api_key_configured=False, model_initialized=False)
 
 
     def _setup_ui(self, root):
@@ -90,7 +98,7 @@ class ComponentComparatorAI:
         self.model_var = tk.StringVar()
         self.model_combobox = ttk.Combobox(root, textvariable=self.model_var, state="readonly")
 
-        self.model_options_list = [ # Assign to instance variable
+        self.model_options_list = [
             "models/gemini-1.0-pro-vision-latest", "models/gemini-pro-vision",
             "models/gemini-1.5-flash-latest", "models/gemini-1.5-flash",
             "models/gemini-1.5-flash-002", "models/gemini-1.5-flash-8b",
@@ -107,10 +115,18 @@ class ComponentComparatorAI:
             "models/gemma-3-27b-it", "models/gemma-3n-e4b-it"
         ]
         self.model_combobox['values'] = self.model_options_list
+
         if self.model_options_list:
-            self.model_combobox.current(0)
+            new_default_model = "models/gemini-1.5-flash-latest"
+            if new_default_model in self.model_options_list:
+                default_model_index = self.model_options_list.index(new_default_model)
+                self.model_combobox.current(default_model_index)
+                print(f"DEBUG: Default model set to: {new_default_model}")
+            else:
+                self.model_combobox.current(0)
+                print(f"DEBUG: Warning - New default model '{new_default_model}' not found. Defaulting to: {self.model_combobox.get()}")
         else:
-            print("Error: model_options_list is empty. Cannot set default Combobox selection.")
+            print("DEBUG: Error - model_options_list is empty. Cannot set default Combobox selection.")
             self.model_combobox.set("No models available")
 
         self.model_combobox.grid(row=2, column=1, padx=5, pady=5, sticky="ew")
@@ -177,7 +193,7 @@ class ComponentComparatorAI:
         try:
             api_key = os.environ.get("GOOGLE_API_KEY")
             if not api_key:
-                self.update_conversation_history("System: Error - GOOGLE_API_KEY environment variable not set. AI features disabled.")
+                print("DEBUG: GOOGLE_API_KEY not found in environment for _configure_ai.")
                 self.api_key_configured = False
             else:
                 genai.configure(api_key=api_key)
@@ -187,38 +203,39 @@ class ComponentComparatorAI:
             self.update_conversation_history(f"System: Error configuring Generative AI SDK - {e}")
             self.api_key_configured = False
         finally:
-            self._update_ui_for_ai_status(model_initialized=(self.model is not None))
+            self._update_ui_for_ai_status(api_key_configured=self.api_key_configured, model_initialized=(self.model is not None))
 
     def _on_model_selected(self, event=None):
+        print(f"DEBUG: _on_model_selected triggered. Current combobox value: '{self.model_combobox.get()}'")
         selected_model_name = self.model_var.get()
-        model_initialized_successfully = self._initialize_model(selected_model_name) # Pass explicit name
+        model_initialized_successfully = self._initialize_model(selected_model_name)
         if model_initialized_successfully:
             self.check_and_process_spec_sheets()
 
     def _initialize_model(self, model_name=None):
-        # Determine the source of model_name and log it
+        source_log = "explicitly passed"
         if model_name is None:
-            fetched_model_name = self.model_combobox.get()
-            self.update_conversation_history(f"System: _initialize_model called without explicit model_name. Fetched from Combobox: '{fetched_model_name}'")
-            model_name = fetched_model_name # Use the fetched name
-        else:
-            self.update_conversation_history(f"System: _initialize_model called with explicit model_name: '{model_name}'")
+            model_name = self.model_combobox.get()
+            source_log = f"fetched from Combobox: '{model_name}'"
 
-        # Validate the obtained model_name against the instance's model_options_list
+        self.update_conversation_history(f"System: _initialize_model called ({source_log}). Target model: '{model_name}'")
+
         if not model_name or model_name not in self.model_options_list:
-            self.update_conversation_history(f"System: Invalid or empty model name ('{model_name}') for initialization. Available options: {len(self.model_options_list)}. Initialization aborted.")
-            self.model = None
-            self.chat_session = None
-            self._update_ui_for_ai_status(model_initialized=False)
-            return False
+            log_msg = f"System: Invalid or empty model name ('{model_name}') for initialization."
+            if self.model_options_list: log_msg += f" Available options: {len(self.model_options_list)}."
+            else: log_msg += " Model options list not available."
+            log_msg += " Initialization aborted."
+            self.update_conversation_history(log_msg)
+            self.model = None; self.chat_session = None
+            self._update_ui_for_ai_status(model_initialized=False); return False
 
-        # Proceed if model_name is valid
         if self.model and self.model.model_name == model_name and self.api_key_configured:
+            self.update_conversation_history(f"System: Model '{model_name}' is already active.")
             self._update_ui_for_ai_status(model_initialized=True); return True
 
         if not self.api_key_configured:
             self.update_conversation_history("System: Cannot initialize model - API key not configured.")
-            self.model = None; self.chat_session = None # Ensure reset
+            self.model = None; self.chat_session = None
             self._update_ui_for_ai_status(model_initialized=False); return False
 
         self.update_conversation_history(f"System: Attempting to initialize AI model: {model_name}...")
@@ -235,26 +252,40 @@ class ComponentComparatorAI:
 
     def send_user_query(self):
         if not self.model or not self.api_key_configured:
-            if not self._initialize_model():
-                self.update_conversation_history("System: AI Model not initialized. Select model & ensure API key is set."); return
-        if not self.model: return
+            if not self._initialize_model(): # Will use current combobox selection
+                self.update_conversation_history("System: AI Model not initialized. Please select a model and ensure API key is set."); return
+        if not self.model: # Should be caught by above, but as a final safeguard
+            self.update_conversation_history("System: AI Model is not available. Cannot send message."); return
 
         user_text = self.user_input_entry.get().strip()
         if not user_text: return
         self.update_conversation_history(f"User: {user_text}"); self.user_input_entry.delete(0, tk.END)
+
+        active_model_name = self.model.model_name if self.model else "Unknown Model"
         try:
             self.send_button.config(state=tk.DISABLED); self.user_input_entry.config(state=tk.DISABLED)
             if not self.chat_session:
-                self.update_conversation_history(f"System: Starting new chat session with {self.model.model_name}...")
+                self.update_conversation_history(f"System: Starting new chat session with {active_model_name}...")
                 try: self.chat_session = self.model.start_chat(history=[])
-                except Exception as e: self.update_conversation_history(f"System: Error starting chat: {e}"); self._update_ui_for_ai_status(); return
-            self.update_conversation_history(f"System: Sending to AI ({self.model.model_name})..."); response = self.chat_session.send_message(user_text)
-            self.update_conversation_history(f"AI ({self.model.model_name}): {response.text}")
+                except Exception as e:
+                    self.update_conversation_history(f"System: Error starting chat session with {active_model_name}: {e}")
+                    self._update_ui_for_ai_status() # Update UI based on current model/API key state
+                    return
+
+            self.update_conversation_history(f"System: Sending to AI ({active_model_name})...");
+            response = self.chat_session.send_message(user_text)
+            self.update_conversation_history(f"AI ({active_model_name}): {response.text}")
         except Exception as e:
-            self.update_conversation_history(f"System: Error during AI interaction: {e}")
-            if isinstance(e, google_exceptions.PermissionDenied): self.api_key_configured = False
-            if isinstance(e, (google_exceptions.InvalidArgument, ValueError, BlockedPromptException, StopCandidateException)): self.model = None; self.chat_session = None
+            error_message = f"System: Error during AI interaction with {active_model_name}: {e}"
+            self.update_conversation_history(error_message)
+            if isinstance(e, (google_exceptions.PermissionDenied, google_exceptions.Unauthenticated)):
+                self.api_key_configured = False # API key might be invalid or revoked
+            # For critical errors that might make the current model/session unusable
+            if isinstance(e, (google_exceptions.InvalidArgument, ValueError, BlockedPromptException, StopCandidateException, google_exceptions.NotFound, google_exceptions.PermissionDenied)):
+                self.update_conversation_history(f"System: Resetting current AI model ({active_model_name}) due to error.")
+                self.model = None; self.chat_session = None
         finally: self._update_ui_for_ai_status()
+
 
     def download_history(self):
         if not self.conversation_log: self.update_conversation_history("System: History empty."); return
@@ -274,20 +305,27 @@ class ComponentComparatorAI:
     def clear_all(self):
         self.spec_sheet_1_label.config(text="File 1: None"); self.spec_sheet_1_path = None; self.spec_sheet_1_text = None; self.spec_sheet_1_image_paths = []
         self.spec_sheet_2_label.config(text="File 2: None"); self.spec_sheet_2_path = None; self.spec_sheet_2_text = None; self.spec_sheet_2_image_paths = []
-        if self.model_options_list: self.model_combobox.current(0) # Reset to first option if list exists
-        else: self.model_combobox.set("") # Clear if no options
-        current_model_name_before_reset = self.model_var.get() # Get before self.model is None
+
+        default_model_to_set = "models/gemini-1.5-flash-latest"
+        if self.model_options_list:
+            if default_model_to_set in self.model_options_list:
+                self.model_combobox.current(self.model_options_list.index(default_model_to_set))
+            else: self.model_combobox.current(0)
+        else: self.model_combobox.set("")
+
         self.model = None; self.chat_session = None; self.conversation_log = []
         if hasattr(self, 'conversation_history'): self.conversation_history.config(state=tk.NORMAL); self.conversation_history.delete(1.0, tk.END)
+
         self._configure_ai()
-        if self.api_key_configured: self._initialize_model(current_model_name_before_reset)
-        else: self._update_ui_for_ai_status(model_initialized=False)
+        if self.api_key_configured: self._initialize_model(self.model_var.get()) # Use current combobox value
+        else: self._update_ui_for_ai_status(api_key_configured=False, model_initialized=False)
+
         if hasattr(self, 'user_input_entry'): self.user_input_entry.delete(0, tk.END)
         try:
             if os.path.exists(self.temp_image_dir): shutil.rmtree(self.temp_image_dir)
             os.makedirs(self.temp_image_dir)
         except OSError as e: self.update_conversation_history(f"System: Error cleaning temp dir: {e}")
-        print("Clear All: App state reset.")
+        print("DEBUG: Clear All: App state reset.")
 
     def extract_text_from_pdf(self, filepath):
         if not filepath or not os.path.exists(filepath): self.update_conversation_history(f"System: PDF not found: {os.path.basename(filepath or 'Unknown')}"); return ""
@@ -321,22 +359,28 @@ class ComponentComparatorAI:
 
     def check_and_process_spec_sheets(self):
         if not (self.spec_sheet_1_path and self.spec_sheet_2_path): return
-        self.update_conversation_history("System: Both spec sheets loaded. Verifying AI model status...")
+
+        # Clear previous analysis results and log before starting a new one
+        self.update_conversation_history("System: Both spec sheets loaded. Clearing previous analysis and verifying AI model...")
         self.conversation_log = []
         if hasattr(self, 'conversation_history'):
             self.conversation_history.config(state=tk.NORMAL); self.conversation_history.delete(1.0, tk.END)
+
         self._configure_ai()
         if not self.api_key_configured:
             self.update_conversation_history("System: API Key not configured. Cannot process specs."); return
+
+        # Ensure model is initialized (or try to initialize the current selection)
         if not self.model:
             self.update_conversation_history("System: No AI model active. Attempting to initialize from selection...")
             if not self._initialize_model():
                 self.update_conversation_history("System: AI model initialization failed. Please select a model or ensure API key is correct to process specs.")
                 return
+
         self.process_spec_sheets()
 
     def process_spec_sheets(self):
-        if not self.model:
+        if not self.model: # Should be caught by check_and_process_spec_sheets
             self.update_conversation_history("System: Critical - process_spec_sheets called without initialized model.")
             if not self._initialize_model(): self._update_ui_for_ai_status(model_initialized=False); return
         if not self.spec_sheet_1_path or not self.spec_sheet_2_path or not self.api_key_configured:
@@ -374,23 +418,37 @@ class ComponentComparatorAI:
         self.send_to_ai(prompt_parts, is_initial_analysis=True)
 
     def send_to_ai(self, prompt_parts, is_initial_analysis=False):
-        if not self.model: self.update_conversation_history("System: AI model not available."); return
-        model_name_for_log = self.model.model_name if hasattr(self.model, 'model_name') else "Unknown Model"
+        if not self.model:
+            self.update_conversation_history("System: AI model not available for sending request."); return
+
+        active_model_name = self.model.model_name if hasattr(self.model, 'model_name') else "Unknown Model"
         try:
             self.send_button.config(state=tk.DISABLED); self.user_input_entry.config(state=tk.DISABLED)
-            self.update_conversation_history(f"System: Sending request to AI ({model_name_for_log})... May take time.")
-            response = self.model.generate_content(prompt_parts)
+            self.update_conversation_history(f"System: Sending request to AI ({active_model_name})... May take time.")
+            response = self.model.generate_content(prompt_parts, request_options={'timeout': 600}) # Added timeout
+
             if response.prompt_feedback and response.prompt_feedback.block_reason:
-                self.update_conversation_history(f"System: AI Error - Prompt blocked. Reason: {response.prompt_feedback.block_reason}")
-            elif not response.candidates or not response.text:
-                self.update_conversation_history(f"System: AI ({model_name_for_log}): Received no content or empty response.")
-            else: self.update_conversation_history(f"AI ({model_name_for_log}): {response.text}")
-            if is_initial_analysis: self.chat_session = None
+                self.update_conversation_history(f"System: AI Error - Prompt was blocked. Reason: {response.prompt_feedback.block_reason}")
+            elif not response.candidates or not hasattr(response, 'text') or not response.text: # Check .text attribute
+                self.update_conversation_history(f"System: AI ({active_model_name}): Received no content or empty response.")
+            else:
+                self.update_conversation_history(f"AI ({active_model_name}): {response.text}")
+
+            if is_initial_analysis: self.chat_session = None # Reset chat for fresh user queries
+
         except Exception as e:
-            self.update_conversation_history(f"System: Error during AI content generation: {e}")
-            if isinstance(e, google_exceptions.PermissionDenied): self.api_key_configured = False
-            if isinstance(e, (google_exceptions.InvalidArgument, ValueError, BlockedPromptException, StopCandidateException)): self.model = None; self.chat_session = None
-        finally: self._update_ui_for_ai_status()
+            error_message = f"System: Error during AI content generation with {active_model_name}: {e}"
+            self.update_conversation_history(error_message)
+            print(f"DEBUG: AI Error: {error_message}") # Console log for more details
+
+            # Reset model state on critical errors
+            if isinstance(e, (google_exceptions.PermissionDenied, google_exceptions.Unauthenticated)):
+                self.api_key_configured = False
+            if isinstance(e, (google_exceptions.InvalidArgument, ValueError, BlockedPromptException, StopCandidateException, google_exceptions.NotFound, google_exceptions.PermissionDenied)):
+                self.update_conversation_history(f"System: Current AI model instance ({active_model_name}) has been reset due to a critical error.")
+                self.model = None; self.chat_session = None
+        finally:
+            self._update_ui_for_ai_status() # Uses current self.api_key_configured and self.model
 
 def main():
     try:
