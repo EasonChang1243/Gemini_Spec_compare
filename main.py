@@ -80,7 +80,7 @@ class ComponentComparatorAI:
         """
         self.root = root
         self.root.title("Component Comparator AI")
-        self.root.geometry("850x870") # Slightly increased height for translate checkbox
+        self.root.geometry("850x870")
 
         if load_dotenv(): print("DEBUG: Loaded environment variables from .env file.")
         else: print("DEBUG: No .env file found or python-dotenv not available/failed to load.")
@@ -97,7 +97,7 @@ class ComponentComparatorAI:
         self.upload_image_button = None
         self.pending_user_image_path = None
         self.pending_user_image_pil = None
-        self.translate_to_chinese_var = tk.BooleanVar(value=True) # Default to True
+        self.translate_to_chinese_var = tk.BooleanVar(value=True)
 
 
         self.temp_image_dir = "temp_images"; self._create_temp_image_dir()
@@ -183,17 +183,19 @@ class ComponentComparatorAI:
         # --- User Input Controls Frame ---
         self.user_input_controls_frame = ttk.Frame(root)
         self.user_input_controls_frame.grid(row=current_row, column=0, columnspan=2, sticky="ew", padx=5, pady=0)
-        self.user_input_controls_frame.columnconfigure(0, weight=1) # Entry expands
-        # Columns for buttons will be default weight (0), so they don't expand.
+        self.user_input_controls_frame.columnconfigure(0, weight=1)
+        self.user_input_controls_frame.columnconfigure(1, weight=0)
+        self.user_input_controls_frame.columnconfigure(2, weight=0)
+        self.user_input_controls_frame.columnconfigure(3, weight=0)
 
-        ttk.Label(self.user_input_controls_frame, text="Your Message:").grid(row=0, column=0, columnspan=3, padx=5, pady=(5,0), sticky="w")
+        ttk.Label(self.user_input_controls_frame, text="Your Message:").grid(row=0, column=0, columnspan=4, padx=5, pady=(5,0), sticky="w")
 
         self.user_input_entry = ttk.Entry(self.user_input_controls_frame, width=70)
         self.user_input_entry.grid(row=1, column=0, padx=(5,0), pady=5, sticky="ew")
 
         self.translate_to_chinese_checkbutton = ttk.Checkbutton(
             self.user_input_controls_frame,
-            text="AI replies in Chinese", # Shorter text
+            text="AI replies in Chinese",
             variable=self.translate_to_chinese_var,
             onvalue=True,
             offvalue=False
@@ -222,6 +224,35 @@ class ComponentComparatorAI:
 
         root.grid_columnconfigure(0, weight=1)
         root.grid_columnconfigure(1, weight=0)
+
+    def _parse_initial_analysis_response(self, response_text: str) -> dict:
+        """Parses the structured AI response from the initial analysis."""
+        data = {
+            "component1_type": "Unknown",
+            "component2_type": "Unknown",
+            "functionally_similar": "Unknown",
+            "is_similar_flag": False, # Default to False
+            "mfg_pn1": "Not Found",
+            "mfg_pn2": "Not Found"
+        }
+        lines = response_text.split('\n')
+        for line in lines:
+            if line.startswith("Component1_Type:"):
+                data["component1_type"] = line.split(":", 1)[1].strip()
+            elif line.startswith("Component2_Type:"):
+                data["component2_type"] = line.split(":", 1)[1].strip()
+            elif line.startswith("Functionally_Similar:"):
+                similarity_text = line.split(":", 1)[1].strip()
+                data["functionally_similar"] = similarity_text
+                if similarity_text.lower().startswith("yes"):
+                    data["is_similar_flag"] = True
+            elif line.startswith("MFG_PN1:"):
+                data["mfg_pn1"] = line.split(":", 1)[1].strip()
+            elif line.startswith("MFG_PN2:"):
+                data["mfg_pn2"] = line.split(":", 1)[1].strip()
+
+        print(f"DEBUG: Parsed initial analysis: {data}")
+        return data
 
     def on_upload_image(self):
         filetypes = [('Image files', '*.png *.jpg *.jpeg *.bmp *.gif *.webp'), ('All files', '*.*')]
@@ -454,6 +485,7 @@ class ComponentComparatorAI:
         if not self.model: self.update_conversation_history("System: AI Model N/A.", role="error"); return
 
         user_text = self.user_input_entry.get().strip()
+        # self.update_conversation_history is called after constructing prompt_parts_for_ai
         self.user_input_entry.delete(0, tk.END)
 
         prompt_parts_for_ai = []
@@ -488,13 +520,23 @@ class ComponentComparatorAI:
             self._add_to_ai_history('user', log_message_for_user_turn)
 
             self.update_conversation_history(f"System: Sending to AI ({active_model_name})...", role="system")
-            response = self.chat_session.send_message(prompt_parts_for_ai)
+
+            final_prompt_parts_for_sending = list(prompt_parts_for_ai) # Use a copy
+            if self.translate_to_chinese_var.get():
+                translation_instruction = " Please provide your entire response in Chinese."
+                appended_to_text = False
+                for i in range(len(final_prompt_parts_for_sending) - 1, -1, -1):
+                    if isinstance(final_prompt_parts_for_sending[i], str):
+                        final_prompt_parts_for_sending[i] += translation_instruction
+                        appended_to_text = True; break
+                if not appended_to_text: final_prompt_parts_for_sending.append(translation_instruction)
+
+            response = self.chat_session.send_message(final_prompt_parts_for_sending)
             self._add_to_ai_history('model', response.text)
             self.update_conversation_history(f"AI ({active_model_name}): {response.text}", role="ai")
 
             if image_sent_this_turn:
                 self.pending_user_image_path = None; self.pending_user_image_pil = None
-                # self.update_conversation_history(f"System: Image '{image_filename}' sent and cleared.", role="system") # Optional
         except Exception as e:
             err_msg=f"System: Error with AI ({active_model_name}): {e}"; self.update_conversation_history(err_msg,role="error"); print(f"DEBUG: {err_msg}")
             if isinstance(e,(google_exceptions.PermissionDenied,google_exceptions.Unauthenticated)): self.api_key_configured=False
@@ -607,37 +649,68 @@ class ComponentComparatorAI:
         if not self.spec_sheet_2_text: self.update_conversation_history(f"System: Halting. Text extract fail: {os.path.basename(self.spec_sheet_2_path)}.", role="error"); return
         s2_f = os.path.join(self.temp_image_dir, f"{os.path.splitext(os.path.basename(self.spec_sheet_2_path))[0]}_imgs_{len(os.listdir(self.temp_image_dir))}")
         self.spec_sheet_2_image_paths = self.extract_images_from_pdf(self.spec_sheet_2_path, s2_f)
-        sum_ui = (f"System: Analysis Inputs:\n- Spec 1: {os.path.basename(self.spec_sheet_1_path)} ({len(self.spec_sheet_1_image_paths)} imgs)\n"
-                       f"- Spec 2: {os.path.basename(self.spec_sheet_2_path)} ({len(self.spec_sheet_2_image_paths)} imgs)")
-        self.update_conversation_history(sum_ui, role="system")
-        p_log = f"User: Analyze specs: {os.path.basename(self.spec_sheet_1_path)} & {os.path.basename(self.spec_sheet_2_path)}. Texts, {len(self.spec_sheet_1_image_paths) + len(self.spec_sheet_2_image_paths)} images. Req: type, params, compat, diffs."
-        self._add_to_ai_history('user', p_log)
-        p_genai = ["Expert analyst...", f"\n--- Spec 1 Text ---\n{self.spec_sheet_1_text}"]
-        for pth in self.spec_sheet_1_image_paths:
-            try: p_genai.append(Image.open(pth))
-            except Exception as e: self.update_conversation_history(f"System: Error loading img {pth}. Skip. Err: {e}", role="error")
-        p_genai.extend([f"\n--- Spec 2 Text ---\n{self.spec_sheet_2_text}"])
-        for pth in self.spec_sheet_2_image_paths:
-            try: p_genai.append(Image.open(pth))
-            except Exception as e: self.update_conversation_history(f"System: Error loading img {pth}. Skip. Err: {e}", role="error")
-        p_genai.append("\n--- Analysis Request ---\n1. Type for each.\n2. Crucial params.\n3. Pin compat (compat, potential, not, why).\n4. Key spec diffs (electrical, physical) table.\nPresent clearly & concisely.")
-        self.send_to_ai(p_genai, is_initial_analysis=True)
+
+        initial_analysis_prompt_text = (
+            "You are an expert electronics component analyst. Analyze the following two component specification sheets.\n\n"
+            "**Instructions for AI:**\n"
+            "1. For Component 1 (described first), identify its specific component type.\n"
+            "2. For Component 2 (described second), identify its specific component type.\n"
+            "3. Assess if Component 1 and Component 2 are functionally similar (e.g., both are dual N-channel MOSFETs, or one is an LDO regulator and the other a switching regulator, or one is a TVS diode and the other a Zener diode). Your assessment should be based on their primary function.\n"
+            "4. For Component 1, find and extract the first complete Manufacturer Part Number (MFG P/N) listed in its 'Order Information' or equivalent section. If multiple are listed, provide only the first one. If none is explicitly found, state 'Not Found'.\n"
+            "5. For Component 2, find and extract the first complete Manufacturer Part Number (MFG P/N) listed in its 'Order Information' or equivalent section. If multiple are listed, provide only the first one. If none is explicitly found, state 'Not Found'.\n\n"
+            "**Output Format:**\n"
+            "Please provide your response *only* in the following structured format, using these exact labels:\n"
+            "Component1_Type: [Type for component 1]\n"
+            "Component2_Type: [Type for component 2]\n"
+            "Functionally_Similar: [Yes/No, brief explanation]\n"
+            "MFG_PN1: [MFG P/N for component 1 or 'Not Found']\n"
+            "MFG_PN2: [MFG P/N for component 2 or 'Not Found']\n\n"
+            "**Component 1 Data:**\n"
+            f"Text Content:\n{self.spec_sheet_1_text}\n\n"
+            "**Component 2 Data:**\n"
+            f"Text Content:\n{self.spec_sheet_2_text}\n"
+        )
+
+        prompt_parts_for_genai = [initial_analysis_prompt_text]
+        # Add images for component 1
+        for img_path in self.spec_sheet_1_image_paths:
+            try: prompt_parts_for_genai.append(Image.open(img_path))
+            except Exception as e: self.update_conversation_history(f"System: Error loading image {img_path} for Comp 1. Skip. Err: {e}", role="error")
+        # Add images for component 2
+        prompt_parts_for_genai.append("\n--- End of Component 1 Images, Start of Component 2 Images (if any) ---") # Separator for clarity if needed
+        for img_path in self.spec_sheet_2_image_paths:
+            try: prompt_parts_for_genai.append(Image.open(img_path))
+            except Exception as e: self.update_conversation_history(f"System: Error loading image {img_path} for Comp 2. Skip. Err: {e}", role="error")
+
+        user_prompt_for_history_log = "User: Initial component type identification and MFG P/N extraction for spec sheets."
+        self.send_to_ai(prompt_parts_for_genai, is_initial_analysis=True, user_prompt_for_history=user_prompt_for_history_log)
+
 
     def send_to_ai(self, prompt_parts, is_initial_analysis=False, user_prompt_for_history=None):
         if not self.model: self.update_conversation_history("System: AI model N/A.", role="error"); return None
         active_model_name = self.model.model_name
         raw_ai_response_text = ""
+
+        final_prompt_parts = list(prompt_parts) # Work with a copy
+        if self.translate_to_chinese_var.get():
+            translation_instruction = " Please provide your entire response in Chinese."
+            appended_to_text = False
+            for i in range(len(final_prompt_parts) - 1, -1, -1):
+                if isinstance(final_prompt_parts[i], str):
+                    final_prompt_parts[i] += translation_instruction
+                    appended_to_text = True; break
+            if not appended_to_text: final_prompt_parts.append(translation_instruction)
+
         try:
             self.send_button.config(state=tk.DISABLED); self.user_input_entry.config(state=tk.DISABLED)
             if hasattr(self, 'start_comparison_button'): self.start_comparison_button.config(state=tk.DISABLED)
             self.update_conversation_history(f"System: Sending to AI ({active_model_name})... May take time.", role="system")
-            if not is_initial_analysis and user_prompt_for_history:
-                # This was already added by on_start_detailed_comparison calling _add_to_ai_history
-                # Or by send_user_query calling _add_to_ai_history.
-                # So, no need to add 'user' turn here again if it's a chat message.
-                # For initial analysis, process_spec_sheets already added the user turn.
-                pass
-            response = self.model.generate_content(prompt_parts, request_options={'timeout': 600})
+
+            if is_initial_analysis and user_prompt_for_history:
+                 self._add_to_ai_history('user', user_prompt_for_history)
+
+            response = self.model.generate_content(final_prompt_parts, request_options={'timeout': 600})
+
             if response.prompt_feedback and response.prompt_feedback.block_reason:
                 raw_ai_response_text = f"AI Error - Prompt was blocked. Reason: {response.prompt_feedback.block_reason}"
                 self.update_conversation_history(f"System: {raw_ai_response_text}", role="error")
@@ -646,13 +719,34 @@ class ComponentComparatorAI:
                 self.update_conversation_history(f"System: AI ({active_model_name}): {raw_ai_response_text}", role="system")
             else:
                 raw_ai_response_text = response.text
-                self.update_conversation_history(f"AI ({active_model_name}): {raw_ai_response_text}", role="ai")
-            self._add_to_ai_history('model', raw_ai_response_text)
+                self.update_conversation_history(f"AI ({active_model_name}): {raw_ai_response_text}", role="ai") # Display formatted
+
+            self._add_to_ai_history('model', raw_ai_response_text) # Log model's raw response or error
+
             if is_initial_analysis:
                 self.chat_session = None
-                if raw_ai_response_text and "AI Error" not in raw_ai_response_text and hasattr(self, 'start_comparison_button'):
-                    self.start_comparison_button.config(state=tk.NORMAL)
-                    self.update_conversation_history("System: Initial analysis complete. 'Start Detailed Comparison' enabled.", role="system")
+                # Parse the response and update UI elements
+                parsed_info = self._parse_initial_analysis_response(raw_ai_response_text)
+
+                self.update_conversation_history(f"System: Initial Analysis Parsed Data:", role="system")
+                self.update_conversation_history(f"  Component 1 Type: {parsed_info['component1_type']}", role="system")
+                self.update_conversation_history(f"  Component 2 Type: {parsed_info['component2_type']}", role="system")
+                self.update_conversation_history(f"  Functionally Similar: {parsed_info['functionally_similar']}", role="system")
+
+                if hasattr(self, 'mfg_pn_var_1'):
+                    self.mfg_pn_var_1.set(parsed_info['mfg_pn1'] if parsed_info['mfg_pn1'] != "Not Found" else "")
+                    self.update_conversation_history(f"  MFG P/N 1 set to: {self.mfg_pn_var_1.get() or 'Not Found'}", role="system")
+                if hasattr(self, 'mfg_pn_var_2'):
+                    self.mfg_pn_var_2.set(parsed_info['mfg_pn2'] if parsed_info['mfg_pn2'] != "Not Found" else "")
+                    self.update_conversation_history(f"  MFG P/N 2 set to: {self.mfg_pn_var_2.get() or 'Not Found'}", role="system")
+
+                if hasattr(self, 'start_comparison_button'):
+                    if parsed_info["is_similar_flag"] and not ("AI Error" in raw_ai_response_text or "empty/no content" in raw_ai_response_text) :
+                        self.start_comparison_button.config(state=tk.NORMAL)
+                        self.update_conversation_history("System: Components appear functionally similar. 'Start Detailed Comparison' enabled.", role="system")
+                    else:
+                        self.start_comparison_button.config(state=tk.DISABLED)
+                        self.update_conversation_history("System: Components may not be functionally similar or analysis incomplete. Detailed comparison not enabled.", role="system")
             return raw_ai_response_text
         except Exception as e:
             err_msg = f"System: Error with AI ({active_model_name}): {e}"
