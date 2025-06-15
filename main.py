@@ -276,54 +276,99 @@ class ComponentComparatorAI:
 
     def on_start_detailed_comparison(self):
         self.update_conversation_history("System: 'Start Detailed Comparison' initiated...", role="system")
-        if hasattr(self, 'start_comparison_button'): self.start_comparison_button.config(state=tk.DISABLED)
+        if hasattr(self, 'start_comparison_button'):
+            self.start_comparison_button.config(state=tk.DISABLED)
 
-        if not self.model:
-            self.update_conversation_history("System: No AI model initialized. Please select a model.", role="error")
-            return
-        if not (self.spec_sheet_1_text and self.spec_sheet_2_text):
-            self.update_conversation_history("System: Both spec sheets must be loaded and processed.", role="error")
-            return
+        try:
+            if not self.model:
+                self.update_conversation_history("System: No AI model initialized. Please select a model.", role="error")
+                return
+            if not (self.spec_sheet_1_text and self.spec_sheet_2_text):
+                self.update_conversation_history("System: Both spec sheets must be loaded and processed.", role="error")
+                return
 
-        mfg_pn1 = self.mfg_pn_var_1.get() if hasattr(self, 'mfg_pn_var_1') else "N/A"
-        mfg_pn2 = self.mfg_pn_var_2.get() if hasattr(self, 'mfg_pn_var_2') else "N/A"
+            mfg_pn1 = self.mfg_pn_var_1.get() if hasattr(self, 'mfg_pn_var_1') and self.mfg_pn_var_1.get() else "N/A"
+            mfg_pn2 = self.mfg_pn_var_2.get() if hasattr(self, 'mfg_pn_var_2') and self.mfg_pn_var_2.get() else "N/A"
 
-        user_prompt_for_history = (
-            f"User: Detailed comparison request for MFG P/N 1: {mfg_pn1 if mfg_pn1 else 'N/A'} "
-            f"(from {os.path.basename(self.spec_sheet_1_path or 'File 1')}) "
-            f"vs MFG P/N 2: {mfg_pn2 if mfg_pn2 else 'N/A'} "
-            f"(from {os.path.basename(self.spec_sheet_2_path or 'File 2')}). "
-            "Focus: Crucial parameters, differences table, operating temp, SMT compatibility."
-        )
+            # Stage 1: Fetch Parameters
+            self.update_conversation_history(f"System: Stage 1: Fetching relevant parameters for {mfg_pn1} vs {mfg_pn2}...", role="system")
 
-        detailed_prompt_parts_for_genai = [
-            f"Please perform a detailed comparison of two electronic components previously analyzed (initial analysis provided context on component types, text, and images).",
-            f"Component 1 is identified by MFG P/N: {mfg_pn1 if mfg_pn1 else 'N/A'}.",
-            f"Component 2 is identified by MFG P/N: {mfg_pn2 if mfg_pn2 else 'N/A'}.",
-            "Focus on the following aspects for your detailed comparison:",
-            "1. Crucial electrical and physical parameters relevant for comparing these specific component types (list them).",
-            "2. List all key specification differences in a clear, concise markdown table format.",
-            "3. Explicitly state their Operating Temperature ranges.",
-            "4. Assess SMT Compatibility: Can Component 2's package (based on its description in provided text/images) likely be SMT'd onto Component 1's typical PCB footprint? Consider common package names and pin counts. State any assumptions clearly."
-        ]
+            stage1_prompt_text = (
+                f"Based on the two electronic components identified by MFG P/N 1: {mfg_pn1} and MFG P/N 2: {mfg_pn2}, "
+                "please list the crucial electrical and physical parameters relevant for comparing these specific component types. "
+                "Focus on parameters typically found in datasheets that are essential for electrical engineers to make a selection. "
+                "Only list the parameter names, separated by commas."
+            )
+            stage1_user_prompt_for_history = f"User: Request for key parameters for detailed comparison of {mfg_pn1} vs {mfg_pn2}."
 
-        self.update_conversation_history("System: Sending detailed comparison request to AI. This may take some time.", role="system")
-        print(f"DEBUG: Detailed Comparison Prompt Parts being sent to AI (text only shown):\n{detailed_prompt_parts_for_genai}")
+            print(f"DEBUG: Stage 1 Prompt for AI: {stage1_prompt_text}")
 
-        ai_response_text = self.send_to_ai(
-            detailed_prompt_parts_for_genai,
-            is_initial_analysis=False,
-            user_prompt_for_history=user_prompt_for_history
-        )
+            parameters_response_text = self.send_to_ai(
+                [stage1_prompt_text],
+                is_initial_analysis=False, # This is part of detailed comparison, not initial one
+                user_prompt_for_history=stage1_user_prompt_for_history
+            )
 
-        if ai_response_text and not ai_response_text.startswith("AI Error:"):
-            self._populate_comparison_treeview(ai_response_text)
-        else:
-            if not ai_response_text:
-                 self.update_conversation_history("System: Failed to get detailed comparison from AI (no response).", role="error")
+            if not parameters_response_text or parameters_response_text.startswith("AI Error:") or "empty/no content" in parameters_response_text :
+                self.update_conversation_history("System: Stage 1 Failed: Could not fetch relevant parameters from AI. Aborting detailed comparison.", role="error")
+                if not parameters_response_text: # send_to_ai might return None
+                     self.update_conversation_history("System: Failed to get parameters from AI (no response).", role="error")
+                return
 
-        if self.model and hasattr(self, 'start_comparison_button'):
-            self.start_comparison_button.config(state=tk.NORMAL)
+            # Clean up parameter list - remove potential numbering, newlines, and make it a comma separated string
+            identified_parameters = re.sub(r"^\s*[\d.\-\s)]+\s*", "", parameters_response_text.strip(), flags=re.MULTILINE) # Remove leading numbers/bullets
+            identified_parameters = identified_parameters.replace('\n', ', ').replace(';',',').replace('，',',').strip() # Replace newlines/other separators with commas
+            identified_parameters = ", ".join(filter(None, [p.strip() for p in identified_parameters.split(',')])) # Ensure clean comma separation
+
+            if not identified_parameters:
+                self.update_conversation_history("System: Stage 1 Warning: AI did not return any parameters. Proceeding with general comparison.", role="system")
+                # Fallback: if AI returns no params, provide a generic list or let stage 2 proceed without specific guidance.
+                # For now, we'll let stage 2 proceed and it will ask for general differences.
+            else:
+                self.update_conversation_history(f"System: AI identified parameters: {identified_parameters}", role="system")
+
+            # Stage 2: Fetch Detailed Differences Based on Parameters
+            self.update_conversation_history(f"System: Stage 2: Fetching detailed differences for {mfg_pn1} vs {mfg_pn2} based on identified parameters...", role="system")
+
+            stage2_prompt_parts = [
+                f"You are comparing two electronic components: MFG P/N 1: {mfg_pn1} and MFG P/N 2: {mfg_pn2}. "
+                "Their full datasheet text and initial analysis (component types, etc.) have been provided in prior turns of this conversation.\n"
+            ]
+            if identified_parameters:
+                 stage2_prompt_parts.append(f"Focus on the following parameters that were identified as crucial: {identified_parameters}.\n")
+            else:
+                 stage2_prompt_parts.append("Focus on crucial electrical and physical parameters relevant for comparing these specific component types.\n")
+
+            stage2_prompt_parts.extend([
+                "Please perform the following:",
+                "1. List all key specification differences (especially considering the parameters above if provided) in a clear, concise markdown table format. Ensure the table includes columns for Parameter, Value for Component 1, and Value for Component 2. Include a 'Notes' or 'Difference' column if applicable.",
+                "2. Explicitly state their full Operating Temperature ranges (e.g., -40°C to 125°C).",
+                "3. Assess SMT Compatibility: Can Component 2's package (based on its description in provided text/images from prior conversation turns) likely be SMT'd onto Component 1's typical PCB footprint? Consider common package names and pin counts. State any assumptions clearly."
+            ])
+
+            stage2_user_prompt_for_history = (
+                f"User: Request for detailed specification differences, temp ranges, and SMT compatibility "
+                f"for {mfg_pn1} vs {mfg_pn2}"
+                f"{', based on parameters: ' + identified_parameters if identified_parameters else '.'}"
+            )
+
+            print(f"DEBUG: Stage 2 Prompt for AI (text parts only): \n{''.join([str(p) for p in stage2_prompt_parts if isinstance(p, str)])}")
+
+            detailed_comparison_response_text = self.send_to_ai(
+                stage2_prompt_parts,
+                is_initial_analysis=False,
+                user_prompt_for_history=stage2_user_prompt_for_history
+            )
+
+            if detailed_comparison_response_text and not detailed_comparison_response_text.startswith("AI Error:"):
+                self._populate_comparison_treeview(detailed_comparison_response_text)
+            else:
+                if not detailed_comparison_response_text:
+                    self.update_conversation_history("System: Stage 2 Failed: Failed to get detailed comparison from AI (no response).", role="error")
+                # Error message already logged by send_to_ai if it starts with "AI Error:"
+        finally:
+            if self.model and hasattr(self, 'start_comparison_button'):
+                self.start_comparison_button.config(state=tk.NORMAL)
 
 
     def _parse_markdown_table(self, markdown_text: str) -> list:
