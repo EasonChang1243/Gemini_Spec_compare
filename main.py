@@ -142,7 +142,7 @@ class ComponentComparatorAI:
         # Model Selection
         ttk.Label(root, text="Select AI Model:").grid(row=current_row, column=0, padx=10, pady=5, sticky="w")
         self.model_var = tk.StringVar()
-        self.model_combobox = ttk.Combobox(root, textvariable=self.model_var)
+        self.model_combobox = ttk.Combobox(root, textvariable=self.model_var, width=50)
         self.model_options_list = ["models/gemini-1.0-pro-vision-latest", "models/gemini-pro-vision","models/gemini-1.5-flash-latest", "models/gemini-1.5-flash","models/gemini-1.5-flash-002", "models/gemini-1.5-flash-8b","models/gemini-1.5-flash-8b-001", "models/gemini-1.5-flash-8b-latest","models/gemini-2.5-flash-preview-04-17", "models/gemini-2.5-flash-preview-05-20","models/gemini-2.5-flash-preview-04-17-thinking", "models/gemini-2.0-flash-exp","models/gemini-2.0-flash", "models/gemini-2.0-flash-001","models/gemini-2.0-flash-exp-image-generation", "models/gemini-2.0-flash-lite-001","models/gemini-2.0-flash-lite", "models/gemini-2.0-flash-lite-preview-02-05","models/gemini-2.0-flash-lite-preview", "models/gemini-2.0-flash-thinking-exp-01-21","models/gemini-2.0-flash-thinking-exp", "models/gemini-2.0-flash-thinking-exp-1219","models/learnlm-2.0-flash-experimental", "models/gemma-3-1b-it","models/gemma-3-4b-it", "models/gemma-3-12b-it","models/gemma-3-27b-it", "models/gemma-3n-e4b-it"]
         self.model_combobox['values'] = self.model_options_list
         self.model_combobox.set(self.placeholder_text); self.model_combobox.state(["disabled"])
@@ -222,8 +222,8 @@ class ComponentComparatorAI:
         self.clear_all_button = ttk.Button(self.action_buttons_frame, text="Clear All", command=self.clear_all)
         self.clear_all_button.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=5, pady=5)
 
-        root.grid_columnconfigure(0, weight=1)
-        root.grid_columnconfigure(1, weight=0)
+        root.grid_columnconfigure(0, weight=1) # Label column, less expansion needed
+        root.grid_columnconfigure(1, weight=1) # Input widgets column, allow expansion
 
     def _parse_initial_analysis_response(self, response_text: str) -> dict:
         """Parses the structured AI response from the initial analysis."""
@@ -244,7 +244,7 @@ class ComponentComparatorAI:
             elif line.startswith("Functionally_Similar:"):
                 similarity_text = line.split(":", 1)[1].strip()
                 data["functionally_similar"] = similarity_text
-                if similarity_text.lower().startswith("yes"):
+                if similarity_text.lower().startswith("yes") or similarity_text.startswith("是"):
                     data["is_similar_flag"] = True
             elif line.startswith("MFG_PN1:"):
                 data["mfg_pn1"] = line.split(":", 1)[1].strip()
@@ -391,16 +391,95 @@ class ComponentComparatorAI:
 
     def _format_ai_response(self, text_response: str) -> str:
         lines = text_response.split('\n')
-        formatted_lines = []
-        separator_pattern = re.compile(r"^\s*\|?[-:|\s]+\|?\s*$")
-        for line in lines:
-            if '|' in line:
-                processed_line = line
-                if separator_pattern.match(line): processed_line = processed_line.replace("-", "—")
-                processed_line = re.sub(r'\s*\|\s*', '  |  ', processed_line).strip()
-                formatted_lines.append(processed_line)
-            else: formatted_lines.append(line)
-        return "\n".join(formatted_lines)
+        formatted_output_lines = []
+        current_table_lines = []
+        in_table_block = False
+
+        # Pattern to identify a markdown table separator line (e.g., |---|---| or |:---|:---:|)
+        separator_pattern = re.compile(r"^\s*\|?\s*([-:]+\|)+[-:]+\s*\|?\s*$")
+        # Pattern to identify a line that looks like a table row (starts and ends with |)
+        table_row_pattern = re.compile(r"^\s*\|.*\|\s*$")
+
+        def clean_cell_content(cell_text):
+            # Remove leading/trailing whitespace and markdown bold markers
+            return cell_text.strip().replace("**", "")
+
+        def format_table(table_lines):
+            if not table_lines:
+                return ""
+
+            parsed_table = []
+            for line in table_lines:
+                # Remove leading/trailing '|' and split by '|'
+                cells = [clean_cell_content(cell) for cell in line.strip()[1:-1].split('|')]
+                parsed_table.append(cells)
+
+            if not parsed_table:
+                return "\n".join(table_lines) # Should not happen if table_lines is not empty
+
+            num_cols = len(parsed_table[0])
+            # Ensure all rows have the same number of columns, pad if necessary
+            for row_idx, row in enumerate(parsed_table):
+                if len(row) < num_cols:
+                    parsed_table[row_idx].extend([""] * (num_cols - len(row)))
+                elif len(row) > num_cols: # Should ideally not happen with well-formed tables
+                    parsed_table[row_idx] = row[:num_cols]
+
+
+            col_widths = [0] * num_cols
+            for row in parsed_table:
+                for i, cell in enumerate(row):
+                    if i < num_cols: # Ensure we don't go out of bounds
+                        col_widths[i] = max(col_widths[i], len(cell))
+
+            formatted_table_str_lines = []
+            for i, row in enumerate(parsed_table):
+                formatted_row_parts = []
+                for j, cell in enumerate(row):
+                    if j < num_cols: # Ensure we don't go out of bounds
+                        # For separator row, create the separator line based on calculated widths
+                        if separator_pattern.match(table_lines[i].strip()): # Check original line for separator
+                            formatted_row_parts.append('-' * col_widths[j])
+                        else:
+                            formatted_row_parts.append(cell.ljust(col_widths[j]))
+                formatted_table_str_lines.append(" | ".join(formatted_row_parts))
+
+            # Re-add outer pipes for aesthetics if desired, or leave as is for simpler alignment
+            return "\n".join([f"| {s} |" for s in formatted_table_str_lines])
+
+
+        for i, line in enumerate(lines):
+            stripped_line = line.strip()
+
+            is_table_row_candidate = table_row_pattern.match(stripped_line)
+            is_separator = separator_pattern.match(stripped_line)
+
+            if is_table_row_candidate:
+                if not in_table_block:
+                    # Check if this is the start of a new table
+                    # Look ahead for a separator or more table rows
+                    if is_separator or \
+                       (i + 1 < len(lines) and (separator_pattern.match(lines[i+1].strip()) or table_row_pattern.match(lines[i+1].strip()))):
+                        in_table_block = True
+                        current_table_lines.append(stripped_line)
+                    else: # Not a table, just a line with pipes
+                        formatted_output_lines.append(re.sub(r'\s*\|\s*', ' | ', stripped_line))
+                else: # Already in a table block
+                    current_table_lines.append(stripped_line)
+            else: # Not a table row candidate
+                if in_table_block:
+                    # Table block has ended
+                    formatted_output_lines.append(format_table(current_table_lines))
+                    current_table_lines = []
+                    in_table_block = False
+                # Add the non-table line (could be empty)
+                formatted_output_lines.append(line) # Keep original non-table lines
+
+        # If the response ends with a table block
+        if in_table_block and current_table_lines:
+            formatted_output_lines.append(format_table(current_table_lines))
+
+        return "\n".join(formatted_output_lines)
 
     def update_conversation_history(self, message, role="system"):
         if hasattr(self, 'conversation_history') and self.conversation_history:
@@ -524,12 +603,15 @@ class ComponentComparatorAI:
             final_prompt_parts_for_sending = list(prompt_parts_for_ai) # Use a copy
             if self.translate_to_chinese_var.get():
                 translation_instruction = " Please provide your entire response in Chinese."
-                appended_to_text = False
-                for i in range(len(final_prompt_parts_for_sending) - 1, -1, -1):
-                    if isinstance(final_prompt_parts_for_sending[i], str):
-                        final_prompt_parts_for_sending[i] += translation_instruction
-                        appended_to_text = True; break
-                if not appended_to_text: final_prompt_parts_for_sending.append(translation_instruction)
+            else:
+                translation_instruction = " Please provide your entire response in English."
+
+            appended_to_text = False
+            for i in range(len(final_prompt_parts_for_sending) - 1, -1, -1):
+                if isinstance(final_prompt_parts_for_sending[i], str):
+                    final_prompt_parts_for_sending[i] += translation_instruction
+                    appended_to_text = True; break
+            if not appended_to_text: final_prompt_parts_for_sending.append(translation_instruction)
 
             response = self.chat_session.send_message(final_prompt_parts_for_sending)
             self._add_to_ai_history('model', response.text)
@@ -694,12 +776,15 @@ class ComponentComparatorAI:
         final_prompt_parts = list(prompt_parts) # Work with a copy
         if self.translate_to_chinese_var.get():
             translation_instruction = " Please provide your entire response in Chinese."
-            appended_to_text = False
-            for i in range(len(final_prompt_parts) - 1, -1, -1):
-                if isinstance(final_prompt_parts[i], str):
-                    final_prompt_parts[i] += translation_instruction
-                    appended_to_text = True; break
-            if not appended_to_text: final_prompt_parts.append(translation_instruction)
+        else:
+            translation_instruction = " Please provide your entire response in English."
+
+        appended_to_text = False
+        for i in range(len(final_prompt_parts) - 1, -1, -1):
+            if isinstance(final_prompt_parts[i], str):
+                final_prompt_parts[i] += translation_instruction
+                appended_to_text = True; break
+        if not appended_to_text: final_prompt_parts.append(translation_instruction)
 
         try:
             self.send_button.config(state=tk.DISABLED); self.user_input_entry.config(state=tk.DISABLED)
