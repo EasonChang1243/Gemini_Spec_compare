@@ -112,7 +112,7 @@ class ComponentComparatorAI:
 
     def _create_temp_image_dir(self):
         if not os.path.exists(self.temp_image_dir):
-            try: os.makedirs(self.temp_image_dir); print(f"DEBUG: Created temp dir: {self.temp_image_dir}")
+            try: os.makedirs(self.temp_image_dir)
             except OSError as e: print(f"Critical Error creating temp dir {self.temp_image_dir}: {e}"); self.update_conversation_history(f"System: Error creating temp folder: {e}", role="error")
 
     def _setup_ui(self, root):
@@ -127,6 +127,8 @@ class ComponentComparatorAI:
         self.mfg_pn_label_1.grid(row=current_row, column=0, sticky=tk.W, padx=10, pady=2)
         self.mfg_pn_entry_1 = ttk.Entry(root, textvariable=self.mfg_pn_var_1, width=30)
         self.mfg_pn_entry_1.grid(row=current_row, column=1, sticky=tk.EW, padx=5, pady=2)
+        self.mfg_pn_entry_1.bind("<FocusOut>", self._handle_mfg_pn1_entry_change)
+        self.mfg_pn_entry_1.bind("<Return>", self._handle_mfg_pn1_entry_change)
         current_row += 1
         # File 2 & MFG P/N 2
         self.spec_sheet_2_label = ttk.Label(root, text="File 2: None")
@@ -138,7 +140,10 @@ class ComponentComparatorAI:
         self.mfg_pn_label_2.grid(row=current_row, column=0, sticky=tk.W, padx=10, pady=2)
         self.mfg_pn_entry_2 = ttk.Entry(root, textvariable=self.mfg_pn_var_2, width=30)
         self.mfg_pn_entry_2.grid(row=current_row, column=1, sticky=tk.EW, padx=5, pady=2)
+        self.mfg_pn_entry_2.bind("<FocusOut>", self._handle_mfg_pn2_entry_change)
+        self.mfg_pn_entry_2.bind("<Return>", self._handle_mfg_pn2_entry_change)
         current_row += 1
+
         # Model Selection
         ttk.Label(root, text="Select AI Model:").grid(row=current_row, column=0, padx=10, pady=5, sticky="w")
         self.model_var = tk.StringVar()
@@ -196,11 +201,16 @@ class ComponentComparatorAI:
         self.translate_to_chinese_checkbutton = ttk.Checkbutton(
             self.user_input_controls_frame,
             text="AI replies in Chinese",
-            variable=self.translate_to_chinese_var,
+            command=self._handle_translate_chinese_checkbox_change, # Removed variable, added command
             onvalue=True,
             offvalue=False
         )
         self.translate_to_chinese_checkbutton.grid(row=1, column=1, padx=5, pady=5, sticky="e")
+        # Set initial visual state of the checkbutton based on the BooleanVar's current value
+        if self.translate_to_chinese_var.get():
+            self.translate_to_chinese_checkbutton.state(['selected'])
+        else:
+            self.translate_to_chinese_checkbutton.state(['!selected'])
 
         self.upload_image_button = ttk.Button(self.user_input_controls_frame, text="Attach Image", command=self.on_upload_image)
         self.upload_image_button.grid(row=1, column=2, padx=5, pady=5, sticky="e")
@@ -224,6 +234,21 @@ class ComponentComparatorAI:
 
         root.grid_columnconfigure(0, weight=1) # Label column, less expansion needed
         root.grid_columnconfigure(1, weight=1) # Input widgets column, allow expansion
+
+    def _handle_translate_chinese_checkbox_change(self):
+        # Checkbutton's state() method returns a tuple of state flags.
+        # 'selected' is present if checked.
+        is_selected = 'selected' in self.translate_to_chinese_checkbutton.state()
+        self.translate_to_chinese_var.set(is_selected)
+        # The existing trace on self.translate_to_chinese_var should fire after .set()
+
+    def _handle_mfg_pn1_entry_change(self, event=None):
+        current_text = self.mfg_pn_entry_1.get()
+        self.mfg_pn_var_1.set(current_text) # This should trigger the existing trace on mfg_pn_var_1
+
+    def _handle_mfg_pn2_entry_change(self, event=None):
+        current_text = self.mfg_pn_entry_2.get()
+        self.mfg_pn_var_2.set(current_text) # This should trigger the existing trace on mfg_pn_var_2
 
     def _parse_initial_analysis_response(self, response_text: str) -> dict:
         """Parses the structured AI response from the initial analysis."""
@@ -287,6 +312,8 @@ class ComponentComparatorAI:
                 self.update_conversation_history("System: Both spec sheets must be loaded and processed.", role="error")
                 return
 
+            if hasattr(self, 'root'): self.root.update_idletasks()
+            print(f"DEBUG: on_start_detailed_comparison: id(self.mfg_pn_var_1) before get = {id(self.mfg_pn_var_1)}")
             mfg_pn1 = self.mfg_pn_var_1.get() if hasattr(self, 'mfg_pn_var_1') and self.mfg_pn_var_1.get() else "N/A"
             mfg_pn2 = self.mfg_pn_var_2.get() if hasattr(self, 'mfg_pn_var_2') and self.mfg_pn_var_2.get() else "N/A"
 
@@ -300,8 +327,6 @@ class ComponentComparatorAI:
                 "Only list the parameter names, separated by commas."
             )
             stage1_user_prompt_for_history = f"User: Request for key parameters for detailed comparison of {mfg_pn1} vs {mfg_pn2}."
-
-            print(f"DEBUG: Stage 1 Prompt for AI: {stage1_prompt_text}")
 
             parameters_response_text = self.send_to_ai(
                 [stage1_prompt_text],
@@ -646,6 +671,7 @@ class ComponentComparatorAI:
             self.update_conversation_history(f"System: Sending to AI ({active_model_name})...", role="system")
 
             final_prompt_parts_for_sending = list(prompt_parts_for_ai) # Use a copy
+            if hasattr(self, 'root'): self.root.update_idletasks()
             if self.translate_to_chinese_var.get():
                 translation_instruction = " Please provide your entire response in Chinese."
             else:
@@ -819,6 +845,7 @@ class ComponentComparatorAI:
         raw_ai_response_text = ""
 
         final_prompt_parts = list(prompt_parts) # Work with a copy
+        if hasattr(self, 'root'): self.root.update_idletasks()
         if self.translate_to_chinese_var.get():
             translation_instruction = " Please provide your entire response in Chinese."
         else:
@@ -869,6 +896,17 @@ class ComponentComparatorAI:
                 if hasattr(self, 'mfg_pn_var_2'):
                     self.mfg_pn_var_2.set(parsed_info['mfg_pn2'] if parsed_info['mfg_pn2'] != "Not Found" else "")
                     self.update_conversation_history(f"  MFG P/N 2 set to: {self.mfg_pn_var_2.get() or 'Not Found'}", role="system")
+
+                if hasattr(self, 'root'): self.root.update_idletasks()
+
+                # Force update Entry widgets UI
+                if hasattr(self, 'mfg_pn_entry_1'):
+                    self.mfg_pn_entry_1.delete(0, tk.END)
+                    self.mfg_pn_entry_1.insert(0, self.mfg_pn_var_1.get())
+
+                if hasattr(self, 'mfg_pn_entry_2'):
+                    self.mfg_pn_entry_2.delete(0, tk.END)
+                    self.mfg_pn_entry_2.insert(0, self.mfg_pn_var_2.get())
 
                 if hasattr(self, 'start_comparison_button'):
                     if parsed_info["is_similar_flag"] and not ("AI Error" in raw_ai_response_text or "empty/no content" in raw_ai_response_text) :
