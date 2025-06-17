@@ -530,15 +530,6 @@ def _parse_markdown_table(self, markdown_text: str) -> dict or None:
         self.update_conversation_history("System: Detailed comparison table populated.", role="system")
 
     def load_spec_sheet_1(self):
-        self.comparison_treeview.heading("component1", text=f"{pn1[:25]}{'...' if len(pn1)>25 else ''}")
-        self.comparison_treeview.heading("component2", text=f"{pn2[:25]}{'...' if len(pn2)>25 else ''}")
-        for row in parsed_data:
-            self.comparison_treeview.insert("", tk.END, values=(
-                row.get("parameter", ""), row.get("component1", ""),
-                row.get("component2", ""), row.get("notes", "")))
-        self.update_conversation_history("System: Detailed comparison table populated.", role="system")
-
-    def load_spec_sheet_1(self):
         filepath = filedialog.askopenfilename(title="Select Spec Sheet 1 (PDF)", filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")])
         if filepath:
             self.spec_sheet_1_path = filepath
