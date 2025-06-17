@@ -408,39 +408,98 @@ class ComponentComparatorAI:
                 self.start_comparison_button.config(state=tk.NORMAL)
 
 
-    def _parse_markdown_table(self, markdown_text: str) -> list:
-        table_data = []
-        lines = markdown_text.split('\n')
-        header_pattern = re.compile(r"^\s*\|([^|]+)\|([^|]+)\|([^|]+)\|([^|]+)?\|?\s*$")
-        separator_pattern = re.compile(r"^\s*\|?[-:|\s]+\|?\s*$")
-        in_table_block = False
-        for line in lines:
-            line = line.strip()
-            if not line:
-                if in_table_block: in_table_block = False
-                continue
+    def _parse_markdown_table(self, markdown_text: str) -> dict | None:
+        """
+        Parses a markdown table into a dictionary with headers and rows.
+        Returns None if no valid table is found or if parsing fails.
+        Example output: {'type': 'table', 'headers': ['H1', 'H2'], 'rows': [['R1C1', 'R1C2']]}
+        """
+        lines = [line.strip() for line in markdown_text.split('\n') if line.strip()]
+        if not lines:
+            return None
+
+        header_line = None
+        separator_line_index = -1
+        table_rows_lines = []
+
+        # Find header and separator
+        for i, line in enumerate(lines):
             if line.startswith('|') and line.endswith('|'):
-                in_table_block = True
-                if separator_pattern.match(line): continue
-                match = header_pattern.match(line)
-                if match:
-                    parts = [p.strip() for p in match.groups()]
-                    if len(parts) >= 3:
-                        table_data.append({
-                            "parameter": parts[0], "component1": parts[1],
-                            "component2": parts[2], "notes": parts[3] if len(parts) > 3 and parts[3] is not None else ""
-                        })
-            elif in_table_block: in_table_block = False
-        return table_data
+                if i + 1 < len(lines) and re.match(r"^\s*\|?\s*([-:]+\|)+[-:]+\s*\|?\s*$", lines[i+1]):
+                    header_line = line
+                    separator_line_index = i + 1
+                    break
+
+        if not header_line or separator_line_index == -1:
+            return None # Not a table with a clear header and separator
+
+        # Extract headers
+        headers = [h.strip() for h in header_line.strip('|').split('|')]
+        num_columns = len(headers)
+
+        # Extract rows after separator
+        for i in range(separator_line_index + 1, len(lines)):
+            line = lines[i]
+            if line.startswith('|') and line.endswith('|'):
+                cells = [cell.strip() for cell in line.strip('|').split('|')]
+                # Ensure row has same number of columns as header, pad with empty strings if not
+                if len(cells) < num_columns:
+                    cells.extend([""] * (num_columns - len(cells)))
+                elif len(cells) > num_columns:
+                    cells = cells[:num_columns] # Truncate if more columns than headers
+                table_rows_lines.append(cells)
+            else:
+                # Stop if a line is not part of the table
+                break
+
+        if not table_rows_lines: # Header and separator found, but no data rows
+            return {'type': 'table', 'headers': headers, 'rows': []}
+
+        return {'type': 'table', 'headers': headers, 'rows': table_rows_lines}
 
     def _populate_comparison_treeview(self, ai_response_text: str):
         if hasattr(self, 'comparison_treeview'):
             for item in self.comparison_treeview.get_children(): self.comparison_treeview.delete(item)
         else: self.update_conversation_history("System: Treeview not found.", role="error"); return
-        parsed_data = self._parse_markdown_table(ai_response_text)
-        if not parsed_data: self.update_conversation_history("System: No table data parsed for Treeview.", role="system"); return
+
+        # Attempt to parse the response as a generic markdown table first
+        parsed_table_data = self._parse_markdown_table(ai_response_text)
+
+        if not parsed_table_data or not parsed_table_data['rows']:
+            self.update_conversation_history("System: No table data parsed for Treeview or table is empty.", role="system")
+            return
+
         pn1 = self.mfg_pn_var_1.get() or (os.path.basename(self.spec_sheet_1_path) if self.spec_sheet_1_path else "Comp 1")
         pn2 = self.mfg_pn_var_2.get() or (os.path.basename(self.spec_sheet_2_path) if self.spec_sheet_2_path else "Comp 2")
+
+        # Adapt parsed_table_data for the existing treeview structure
+        # Assuming the table structure is Parameter | Comp1 Val | Comp2 Val | Notes
+        # Need to map headers to these roles if possible, or assume fixed column order for now
+        # For simplicity, let's assume the AI provides columns in the expected order for the treeview
+
+        headers = parsed_table_data['headers']
+        # Update treeview column headings if they are generic enough or map them
+        # For now, we'll keep the original treeview headings and map data
+        # self.comparison_treeview.heading("parameter", text=headers[0] if len(headers) > 0 else "Parameter")
+        # self.comparison_treeview.heading("component1", text=headers[1] if len(headers) > 1 else pn1)
+        # self.comparison_treeview.heading("component2", text=headers[2] if len(headers) > 2 else pn2)
+        # self.comparison_treeview.heading("notes", text=headers[3] if len(headers) > 3 else "Notes")
+
+        self.comparison_treeview.heading("component1", text=f"{pn1[:25]}{'...' if len(pn1)>25 else ''}")
+        self.comparison_treeview.heading("component2", text=f"{pn2[:25]}{'...' if len(pn2)>25 else ''}")
+
+        for row_data in parsed_table_data['rows']:
+            # Map row_data list to the tuple expected by treeview.insert
+            # (parameter, component1_val, component2_val, notes)
+            parameter = row_data[0] if len(row_data) > 0 else ""
+            comp1_val = row_data[1] if len(row_data) > 1 else ""
+            comp2_val = row_data[2] if len(row_data) > 2 else ""
+            notes = row_data[3] if len(row_data) > 3 else ""
+            self.comparison_treeview.insert("", tk.END, values=(parameter, comp1_val, comp2_val, notes))
+
+        self.update_conversation_history("System: Detailed comparison table populated.", role="system")
+
+    def load_spec_sheet_1(self):
         self.comparison_treeview.heading("component1", text=f"{pn1[:25]}{'...' if len(pn1)>25 else ''}")
         self.comparison_treeview.heading("component2", text=f"{pn2[:25]}{'...' if len(pn2)>25 else ''}")
         for row in parsed_data:
@@ -471,7 +530,20 @@ class ComponentComparatorAI:
         else:
             self.spec_sheet_2_label.config(text=f"File 2: {os.path.basename(self.spec_sheet_2_path) if self.spec_sheet_2_path else 'None'}")
 
-    def _format_ai_response(self, text_response: str) -> str:
+    def _format_ai_response(self, text_response: str) -> str | dict:
+        # Try to parse as markdown table first
+        parsed_table = self._parse_markdown_table(text_response)
+        if parsed_table:
+            # If a table is successfully parsed, return the structured data
+            return parsed_table
+
+        # Placeholder for HTML table detection and parsing
+        # if is_html_table(text_response):
+        #     parsed_html_table = self._parse_html_table(text_response) # To be implemented
+        #     if parsed_html_table:
+        #         return parsed_html_table
+
+        # Fallback to original text formatting if no table is detected or parsed
         lines = text_response.split('\n')
         formatted_output_lines = []
         current_table_lines = []
@@ -564,14 +636,57 @@ class ComponentComparatorAI:
         return "\n".join(formatted_output_lines)
 
     def update_conversation_history(self, message, role="system"):
+        raw_message_for_log = message # Keep the original message for the log
+
         if hasattr(self, 'conversation_history') and self.conversation_history:
             self.conversation_history.config(state=tk.NORMAL)
             tag_to_apply = {"user": "user_message", "ai": "ai_message", "error": "error_message"}.get(role, "system_message")
-            display_message = self._format_ai_response(message) if role == "ai" else message
-            self.conversation_history.insert(tk.END, display_message + "\n", tag_to_apply)
+
+            if role == "ai":
+                formatted_content = self._format_ai_response(raw_message_for_log) # Use raw message for formatting
+                if isinstance(formatted_content, dict) and formatted_content.get('type') == 'table':
+                    # It's a table dictionary
+                    headers = formatted_content.get('headers', [])
+                    rows = formatted_content.get('rows', [])
+
+                    if headers: # Only proceed if there are headers (even if rows are empty)
+                        table_frame = ttk.Frame(self.conversation_history)
+
+                        column_ids = [f"col_{i}" for i, _ in enumerate(headers)]
+                        tree = ttk.Treeview(table_frame, columns=column_ids, show="headings", height=len(rows) if rows else 1)
+
+                        for i, header_text in enumerate(headers):
+                            tree.heading(column_ids[i], text=header_text.strip(), anchor=tk.W)
+                            tree.column(column_ids[i], anchor=tk.W, width=100, stretch=tk.YES) # Default width
+
+                        for row_data in rows:
+                            processed_row = []
+                            for cell_idx, cell in enumerate(row_data):
+                                if cell_idx < len(column_ids): # Ensure we don't process more cells than columns
+                                    cell_text = str(cell).replace('\n', ' ').replace('<br>', ' ')
+                                    processed_row.append(cell_text)
+                            tree.insert("", tk.END, values=processed_row)
+
+                        tree.pack(side=tk.LEFT, fill=tk.X, expand=True) # Fill X, expand horizontally
+
+                        # Add a newline tag before the window to ensure it's styled if empty
+                        self.conversation_history.insert(tk.END, '\n', tag_to_apply) # Use the role-specific tag
+                        self.conversation_history.window_create(tk.END, window=table_frame)
+                        self.conversation_history.insert(tk.END, '\n', tag_to_apply)
+                    else: # Empty table or malformed
+                        display_message = "AI Table (empty or malformed)\n"
+                        self.conversation_history.insert(tk.END, display_message, tag_to_apply)
+                else: # It's formatted text (string)
+                    display_message = formatted_content
+                    self.conversation_history.insert(tk.END, str(display_message) + "\n", tag_to_apply)
+            else: # User, system, error messages
+                display_message = raw_message_for_log
+                self.conversation_history.insert(tk.END, display_message + "\n", tag_to_apply)
+
             self.conversation_history.see(tk.END)
             self.conversation_history.config(state=tk.DISABLED)
-        self.conversation_log.append(message)
+
+        self.conversation_log.append(raw_message_for_log)
 
     def _update_ui_for_ai_status(self, api_key_configured=None, model_initialized=None):
         if not hasattr(self, 'send_button'): return
