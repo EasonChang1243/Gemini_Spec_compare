@@ -408,70 +408,84 @@ class ComponentComparatorAI:
                 self.start_comparison_button.config(state=tk.NORMAL)
 
 
-    def _parse_markdown_table(self, markdown_text: str) -> dict | None:
-        """
-        Parses a markdown table into a dictionary with headers and rows.
-        Returns None if no valid table is found or if parsing fails.
-        Example output: {'type': 'table', 'headers': ['H1', 'H2'], 'rows': [['R1C1', 'R1C2']]}
-        """
-        # Use splitlines() for universal newline handling and strip each line.
-        # Filter out lines that become empty after stripping.
-        lines = [line.strip() for line in markdown_text.splitlines() if line.strip()]
-        if not lines:
-            return None
+def _parse_markdown_table(self, markdown_text: str) -> dict or None:
+    # Filter out empty lines and strip whitespace
+    lines = [line.strip() for line in markdown_text.splitlines() if line.strip()]
+    if not lines:
+        return None
 
-        header_line_text = None
-        separator_line_index = -1
+    header_line_index = -1
+    header_line_text = "" # Initialize to empty string
+    separator_line_index = -1
 
-        # Find header and separator lines
-        for i, current_line_text in enumerate(lines):
-            # Potential header lines must start and end with a pipe.
-            if not (current_line_text.startswith('|') and current_line_text.endswith('|')):
-                continue
+    # USE THIS REGEX:
+    separator_pattern = r"^\s*\|(\s*[:\-]+\s*\|)*\s*[:\-]+\s*\|\s*$"
 
-            if i + 1 < len(lines):
-                next_line_text = lines[i+1] # Already stripped from the initial list comprehension
-                # Improved regex for separator line (handles single column too)
-                # Use re.fullmatch to ensure the entire line matches the separator pattern.
-                if re.fullmatch(r"^\s*\|?\s*([-:]+\|)*[-:]+\s*\|?\s*$", next_line_text):
-                    # Check if the potential header line has at least one cell.
-                    if current_line_text.count('|') >= 2 : # e.g., |Header1| requires two pipes
-                        header_line_text = current_line_text
-                        separator_line_index = i + 1
-                        break
+    # Find header and separator lines
+    for i, current_line_text in enumerate(lines):
+        if not current_line_text.startswith('|') or not current_line_text.endswith('|'):
+            continue
+        # A header line must have at least one column, meaning at least 2 pipes.
+        if current_line_text.count('|') < 2:
+            continue
 
-        if not header_line_text or separator_line_index == -1:
-            return None # No valid header and separator found
+        if (i + 1) < len(lines):
+            next_line_text = lines[i+1].strip() # Ensure next_line is also stripped, though it should be from initial list comprehension
+            if re.fullmatch(separator_pattern, next_line_text):
+                # Validate that the number of segments in separator matches number of headers
+                temp_headers = [h.strip() for h in current_line_text[1:-1].split('|')]
+                num_header_cols = len(temp_headers)
 
-        # Extract headers: remove leading/trailing pipes then split.
-        headers = [h.strip() for h in header_line_text[1:-1].split('|')]
-        num_columns = len(headers)
+                # The separator line, if matched by the regex, is guaranteed to start and end with '|'.
+                # So, the number of columns it defines is count_of_pipes - 1.
+                num_separator_cols = next_line_text.count('|') - 1
 
-        if num_columns == 0: # Should be caught by header_line.count('|') >= 2, but as a safeguard.
-            return None
+                if num_header_cols == num_separator_cols and num_header_cols > 0: # Ensure at least one column
+                    header_line_index = i
+                    header_line_text = current_line_text
+                    separator_line_index = i + 1
+                    break
 
-        # Extract rows after separator
-        table_rows_data = []
-        for i in range(separator_line_index + 1, len(lines)):
-            current_row_text = lines[i] # Already stripped
-            # Table rows must also start and end with a pipe.
-            if not (current_row_text.startswith('|') and current_row_text.endswith('|')):
-                # If a line in the table body doesn't conform, assume table block has ended.
+    if header_line_index == -1: # No valid header and separator pair found
+        return None
+
+    headers = [h.strip() for h in header_line_text[1:-1].split('|')]
+    num_cols = len(headers)
+    # num_cols will be > 0 due to the num_header_cols > 0 check above.
+
+    table_rows_data = []
+    # Process rows after the separator line
+    for i in range(separator_line_index + 1, len(lines)):
+        current_row_text = lines[i].strip() # Ensure row text is stripped, though it should be
+        if current_row_text.startswith('|') and current_row_text.endswith('|'):
+            # A row must have num_cols + 1 pipes to match the header structure.
+            if current_row_text.count('|') != num_cols + 1:
+                # If pipe count doesn't match, assume end of table or a malformed row that doesn't fit.
                 break
 
             cells = [cell.strip() for cell in current_row_text[1:-1].split('|')]
 
-            # Adjust cell count to match header count
-            if len(cells) < num_columns:
-                    cells.extend([""] * (num_columns - len(cells)))
-                elif len(cells) > num_columns:
-                    cells = cells[:num_columns] # Truncate if more cells than headers
+            # Cell padding/truncating logic (ensure it's robust if cells has unexpected length vs num_cols)
+            # Given the strict pipe check above, len(cells) should exactly match num_cols here.
+            # If the pipe check `current_row_text.count('|') != num_cols + 1` is removed or relaxed,
+            # then padding/truncation becomes critical.
+            # For now, assuming cells will have num_cols elements due to the pipe count check.
+            if len(cells) == num_cols:
+                 table_rows_data.append(cells)
+            else:
+                # This case should ideally not be reached if the pipe count check is active and correct.
+                # If it is reached, it implies a mismatch despite pipe count, or pipe check is flawed.
+                # Pad or truncate as a fallback.
+                if len(cells) < num_cols:
+                    cells.extend([""] * (num_cols - len(cells)))
+                else: # len(cells) > num_cols
+                    cells = cells[:num_cols]
                 table_rows_data.append(cells)
-            # else: (Implicitly, if line doesn't start/end with pipe, loop breaks)
-            #     break
+        else:
+            # Line is not part of the table
+            break
 
-        # An empty table (headers only, no data rows) is considered a valid table structure.
-        return {'type': 'table', 'headers': headers, 'rows': table_rows_data}
+    return {'type': 'table', 'headers': headers, 'rows': table_rows_data}
 
     def _populate_comparison_treeview(self, ai_response_text: str):
         if hasattr(self, 'comparison_treeview'):
