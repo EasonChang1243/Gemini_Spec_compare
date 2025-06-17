@@ -82,8 +82,7 @@ class ComponentComparatorAI:
         self.root.title("Component Comparator AI")
         self.root.geometry("850x870")
 
-        if load_dotenv(): print("DEBUG: Loaded environment variables from .env file.")
-        else: print("DEBUG: No .env file found or python-dotenv not available/failed to load.")
+        load_dotenv()
 
         self.spec_sheet_1_path = None; self.spec_sheet_1_text = None; self.spec_sheet_1_image_paths = []
         self.mfg_pn_var_1 = tk.StringVar()
@@ -244,11 +243,11 @@ class ComponentComparatorAI:
 
     def _handle_mfg_pn1_entry_change(self, event=None):
         current_text = self.mfg_pn_entry_1.get()
-        self.mfg_pn_var_1.set(current_text) # This should trigger the existing trace on mfg_pn_var_1
+        self.mfg_pn_var_1.set(current_text)
 
     def _handle_mfg_pn2_entry_change(self, event=None):
         current_text = self.mfg_pn_entry_2.get()
-        self.mfg_pn_var_2.set(current_text) # This should trigger the existing trace on mfg_pn_var_2
+        self.mfg_pn_var_2.set(current_text)
 
     def _parse_initial_analysis_response(self, response_text: str) -> dict:
         """Parses the structured AI response from the initial analysis."""
@@ -276,7 +275,6 @@ class ComponentComparatorAI:
             elif line.startswith("MFG_PN2:"):
                 data["mfg_pn2"] = line.split(":", 1)[1].strip()
 
-        print(f"DEBUG: Parsed initial analysis: {data}")
         return data
 
     def on_upload_image(self):
@@ -313,7 +311,6 @@ class ComponentComparatorAI:
                 return
 
             if hasattr(self, 'root'): self.root.update_idletasks()
-            print(f"DEBUG: on_start_detailed_comparison: id(self.mfg_pn_var_1) before get = {id(self.mfg_pn_var_1)}")
             mfg_pn1 = self.mfg_pn_var_1.get() if hasattr(self, 'mfg_pn_var_1') and self.mfg_pn_var_1.get() else "N/A"
             mfg_pn2 = self.mfg_pn_var_2.get() if hasattr(self, 'mfg_pn_var_2') and self.mfg_pn_var_2.get() else "N/A"
 
@@ -355,20 +352,36 @@ class ComponentComparatorAI:
             # Stage 2: Fetch Detailed Differences Based on Parameters
             self.update_conversation_history(f"System: Stage 2: Fetching detailed differences for {mfg_pn1} vs {mfg_pn2} based on identified parameters...", role="system")
 
+            datasheet_sourcing_instruction = (
+                "IMPORTANT INSTRUCTIONS FOR AI RESPONSE:\n"
+                "- Base your answers primarily on the information extracted from the provided component datasheets "
+                "(text, images, and context from previous turns).\n"
+                "- If the datasheets lack specific information to answer a point, you may use your general knowledge.\n"
+                "- If you use general knowledge, you MUST explicitly state for which points the information was not found "
+                "in the datasheets and that your answer for those points is based on general understanding.\n"
+            )
+
             stage2_prompt_parts = [
-                f"You are comparing two electronic components: MFG P/N 1: {mfg_pn1} and MFG P/N 2: {mfg_pn2}. "
-                "Their full datasheet text and initial analysis (component types, etc.) have been provided in prior turns of this conversation.\n"
+                f"You are comparing two electronic components: MFG P/N 1: {mfg_pn1} and MFG P/N 2: {mfg_pn2}.\n\n"
+                "--- COMPONENT 1 DATASHEET TEXT START ---\n"
+                f"{self.spec_sheet_1_text}\n"
+                "--- COMPONENT 1 DATASHEET TEXT END ---\n\n"
+                "--- COMPONENT 2 DATASHEET TEXT START ---\n"
+                f"{self.spec_sheet_2_text}\n"
+                "--- COMPONENT 2 DATASHEET TEXT END ---\n\n",
+                datasheet_sourcing_instruction,
             ]
+
             if identified_parameters:
-                 stage2_prompt_parts.append(f"Focus on the following parameters that were identified as crucial: {identified_parameters}.\n")
+                 stage2_prompt_parts.append(f"Focus on the following parameters that were identified for these components: {identified_parameters}.\n")
             else:
                  stage2_prompt_parts.append("Focus on crucial electrical and physical parameters relevant for comparing these specific component types.\n")
 
             stage2_prompt_parts.extend([
-                "Please perform the following:",
+                "Based PRIMARILY on the provided datasheet texts above, please perform the following:",
                 "1. List all key specification differences (especially considering the parameters above if provided) in a clear, concise markdown table format. Ensure the table includes columns for Parameter, Value for Component 1, and Value for Component 2. Include a 'Notes' or 'Difference' column if applicable.",
                 "2. Explicitly state their full Operating Temperature ranges (e.g., -40°C to 125°C).",
-                "3. Assess SMT Compatibility: Can Component 2's package (based on its description in provided text/images from prior conversation turns) likely be SMT'd onto Component 1's typical PCB footprint? Consider common package names and pin counts. State any assumptions clearly."
+                "3. Assess SMT Compatibility: Can Component 2's package (based on its description in provided text/images - though prioritize the full texts now re-provided) likely be SMT'd onto Component 1's typical PCB footprint? Consider common package names and pin counts. State any assumptions clearly."
             ])
 
             stage2_user_prompt_for_history = (
@@ -376,8 +389,6 @@ class ComponentComparatorAI:
                 f"for {mfg_pn1} vs {mfg_pn2}"
                 f"{', based on parameters: ' + identified_parameters if identified_parameters else '.'}"
             )
-
-            print(f"DEBUG: Stage 2 Prompt for AI (text parts only): \n{''.join([str(p) for p in stage2_prompt_parts if isinstance(p, str)])}")
 
             detailed_comparison_response_text = self.send_to_ai(
                 stage2_prompt_parts,
@@ -419,7 +430,7 @@ class ComponentComparatorAI:
                             "component2": parts[2], "notes": parts[3] if len(parts) > 3 and parts[3] is not None else ""
                         })
             elif in_table_block: in_table_block = False
-        print(f"DEBUG: Parsed table data: {table_data}"); return table_data
+        return table_data
 
     def _populate_comparison_treeview(self, ai_response_text: str):
         if hasattr(self, 'comparison_treeview'):
@@ -670,7 +681,20 @@ class ComponentComparatorAI:
 
             self.update_conversation_history(f"System: Sending to AI ({active_model_name})...", role="system")
 
-            final_prompt_parts_for_sending = list(prompt_parts_for_ai) # Use a copy
+            datasheet_sourcing_instruction_text = (
+                "IMPORTANT INSTRUCTIONS FOR AI RESPONSE:\n"
+                "- Base your answers primarily on the information extracted from the provided component datasheets "
+                "(text, images, and context from previous conversation turns, including component type and MFG P/N if known).\n"
+                "- If the datasheets or prior conversation context lack specific information to answer your query, you may use your general knowledge.\n"
+                "- If you use general knowledge, you MUST explicitly state that the information was not found in the provided datasheets/context "
+                "and that your answer is based on general understanding.\n\n"
+            )
+
+            # Construct the prompt with sourcing instruction first, then user's actual content parts
+            prompt_with_sourcing_instruction = [datasheet_sourcing_instruction_text] + prompt_parts_for_ai
+
+            final_prompt_parts_for_sending = list(prompt_with_sourcing_instruction) # Use a copy
+
             if hasattr(self, 'root'): self.root.update_idletasks()
             if self.translate_to_chinese_var.get():
                 translation_instruction = " Please provide your entire response in Chinese."
