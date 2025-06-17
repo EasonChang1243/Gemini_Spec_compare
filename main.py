@@ -82,8 +82,7 @@ class ComponentComparatorAI:
         self.root.title("Component Comparator AI")
         self.root.geometry("850x870")
 
-        if load_dotenv(): print("DEBUG: Loaded environment variables from .env file.")
-        else: print("DEBUG: No .env file found or python-dotenv not available/failed to load.")
+        load_dotenv()
 
         self.spec_sheet_1_path = None; self.spec_sheet_1_text = None; self.spec_sheet_1_image_paths = []
         self.mfg_pn_var_1 = tk.StringVar()
@@ -112,7 +111,7 @@ class ComponentComparatorAI:
 
     def _create_temp_image_dir(self):
         if not os.path.exists(self.temp_image_dir):
-            try: os.makedirs(self.temp_image_dir); print(f"DEBUG: Created temp dir: {self.temp_image_dir}")
+            try: os.makedirs(self.temp_image_dir)
             except OSError as e: print(f"Critical Error creating temp dir {self.temp_image_dir}: {e}"); self.update_conversation_history(f"System: Error creating temp folder: {e}", role="error")
 
     def _setup_ui(self, root):
@@ -127,6 +126,8 @@ class ComponentComparatorAI:
         self.mfg_pn_label_1.grid(row=current_row, column=0, sticky=tk.W, padx=10, pady=2)
         self.mfg_pn_entry_1 = ttk.Entry(root, textvariable=self.mfg_pn_var_1, width=30)
         self.mfg_pn_entry_1.grid(row=current_row, column=1, sticky=tk.EW, padx=5, pady=2)
+        self.mfg_pn_entry_1.bind("<FocusOut>", self._handle_mfg_pn1_entry_change)
+        self.mfg_pn_entry_1.bind("<Return>", self._handle_mfg_pn1_entry_change)
         current_row += 1
         # File 2 & MFG P/N 2
         self.spec_sheet_2_label = ttk.Label(root, text="File 2: None")
@@ -138,7 +139,10 @@ class ComponentComparatorAI:
         self.mfg_pn_label_2.grid(row=current_row, column=0, sticky=tk.W, padx=10, pady=2)
         self.mfg_pn_entry_2 = ttk.Entry(root, textvariable=self.mfg_pn_var_2, width=30)
         self.mfg_pn_entry_2.grid(row=current_row, column=1, sticky=tk.EW, padx=5, pady=2)
+        self.mfg_pn_entry_2.bind("<FocusOut>", self._handle_mfg_pn2_entry_change)
+        self.mfg_pn_entry_2.bind("<Return>", self._handle_mfg_pn2_entry_change)
         current_row += 1
+
         # Model Selection
         ttk.Label(root, text="Select AI Model:").grid(row=current_row, column=0, padx=10, pady=5, sticky="w")
         self.model_var = tk.StringVar()
@@ -196,11 +200,16 @@ class ComponentComparatorAI:
         self.translate_to_chinese_checkbutton = ttk.Checkbutton(
             self.user_input_controls_frame,
             text="AI replies in Chinese",
-            variable=self.translate_to_chinese_var,
+            command=self._handle_translate_chinese_checkbox_change, # Removed variable, added command
             onvalue=True,
             offvalue=False
         )
         self.translate_to_chinese_checkbutton.grid(row=1, column=1, padx=5, pady=5, sticky="e")
+        # Set initial visual state of the checkbutton based on the BooleanVar's current value
+        if self.translate_to_chinese_var.get():
+            self.translate_to_chinese_checkbutton.state(['selected'])
+        else:
+            self.translate_to_chinese_checkbutton.state(['!selected'])
 
         self.upload_image_button = ttk.Button(self.user_input_controls_frame, text="Attach Image", command=self.on_upload_image)
         self.upload_image_button.grid(row=1, column=2, padx=5, pady=5, sticky="e")
@@ -224,6 +233,21 @@ class ComponentComparatorAI:
 
         root.grid_columnconfigure(0, weight=1) # Label column, less expansion needed
         root.grid_columnconfigure(1, weight=1) # Input widgets column, allow expansion
+
+    def _handle_translate_chinese_checkbox_change(self):
+        # Checkbutton's state() method returns a tuple of state flags.
+        # 'selected' is present if checked.
+        is_selected = 'selected' in self.translate_to_chinese_checkbutton.state()
+        self.translate_to_chinese_var.set(is_selected)
+        # The existing trace on self.translate_to_chinese_var should fire after .set()
+
+    def _handle_mfg_pn1_entry_change(self, event=None):
+        current_text = self.mfg_pn_entry_1.get()
+        self.mfg_pn_var_1.set(current_text)
+
+    def _handle_mfg_pn2_entry_change(self, event=None):
+        current_text = self.mfg_pn_entry_2.get()
+        self.mfg_pn_var_2.set(current_text)
 
     def _parse_initial_analysis_response(self, response_text: str) -> dict:
         """Parses the structured AI response from the initial analysis."""
@@ -251,7 +275,6 @@ class ComponentComparatorAI:
             elif line.startswith("MFG_PN2:"):
                 data["mfg_pn2"] = line.split(":", 1)[1].strip()
 
-        print(f"DEBUG: Parsed initial analysis: {data}")
         return data
 
     def on_upload_image(self):
@@ -276,54 +299,112 @@ class ComponentComparatorAI:
 
     def on_start_detailed_comparison(self):
         self.update_conversation_history("System: 'Start Detailed Comparison' initiated...", role="system")
-        if hasattr(self, 'start_comparison_button'): self.start_comparison_button.config(state=tk.DISABLED)
+        if hasattr(self, 'start_comparison_button'):
+            self.start_comparison_button.config(state=tk.DISABLED)
 
-        if not self.model:
-            self.update_conversation_history("System: No AI model initialized. Please select a model.", role="error")
-            return
-        if not (self.spec_sheet_1_text and self.spec_sheet_2_text):
-            self.update_conversation_history("System: Both spec sheets must be loaded and processed.", role="error")
-            return
+        try:
+            if not self.model:
+                self.update_conversation_history("System: No AI model initialized. Please select a model.", role="error")
+                return
+            if not (self.spec_sheet_1_text and self.spec_sheet_2_text):
+                self.update_conversation_history("System: Both spec sheets must be loaded and processed.", role="error")
+                return
 
-        mfg_pn1 = self.mfg_pn_var_1.get() if hasattr(self, 'mfg_pn_var_1') else "N/A"
-        mfg_pn2 = self.mfg_pn_var_2.get() if hasattr(self, 'mfg_pn_var_2') else "N/A"
+            if hasattr(self, 'root'): self.root.update_idletasks()
+            mfg_pn1 = self.mfg_pn_var_1.get() if hasattr(self, 'mfg_pn_var_1') and self.mfg_pn_var_1.get() else "N/A"
+            mfg_pn2 = self.mfg_pn_var_2.get() if hasattr(self, 'mfg_pn_var_2') and self.mfg_pn_var_2.get() else "N/A"
 
-        user_prompt_for_history = (
-            f"User: Detailed comparison request for MFG P/N 1: {mfg_pn1 if mfg_pn1 else 'N/A'} "
-            f"(from {os.path.basename(self.spec_sheet_1_path or 'File 1')}) "
-            f"vs MFG P/N 2: {mfg_pn2 if mfg_pn2 else 'N/A'} "
-            f"(from {os.path.basename(self.spec_sheet_2_path or 'File 2')}). "
-            "Focus: Crucial parameters, differences table, operating temp, SMT compatibility."
-        )
+            # Stage 1: Fetch Parameters
+            self.update_conversation_history(f"System: Stage 1: Fetching relevant parameters for {mfg_pn1} vs {mfg_pn2}...", role="system")
 
-        detailed_prompt_parts_for_genai = [
-            f"Please perform a detailed comparison of two electronic components previously analyzed (initial analysis provided context on component types, text, and images).",
-            f"Component 1 is identified by MFG P/N: {mfg_pn1 if mfg_pn1 else 'N/A'}.",
-            f"Component 2 is identified by MFG P/N: {mfg_pn2 if mfg_pn2 else 'N/A'}.",
-            "Focus on the following aspects for your detailed comparison:",
-            "1. Crucial electrical and physical parameters relevant for comparing these specific component types (list them).",
-            "2. List all key specification differences in a clear, concise markdown table format.",
-            "3. Explicitly state their Operating Temperature ranges.",
-            "4. Assess SMT Compatibility: Can Component 2's package (based on its description in provided text/images) likely be SMT'd onto Component 1's typical PCB footprint? Consider common package names and pin counts. State any assumptions clearly."
-        ]
+            stage1_prompt_text = (
+                f"Based on the two electronic components identified by MFG P/N 1: {mfg_pn1} and MFG P/N 2: {mfg_pn2}, "
+                "please list the crucial electrical and physical parameters relevant for comparing these specific component types. "
+                "Focus on parameters typically found in datasheets that are essential for electrical engineers to make a selection. "
+                "Only list the parameter names, separated by commas."
+            )
+            stage1_user_prompt_for_history = f"User: Request for key parameters for detailed comparison of {mfg_pn1} vs {mfg_pn2}."
 
-        self.update_conversation_history("System: Sending detailed comparison request to AI. This may take some time.", role="system")
-        print(f"DEBUG: Detailed Comparison Prompt Parts being sent to AI (text only shown):\n{detailed_prompt_parts_for_genai}")
+            parameters_response_text = self.send_to_ai(
+                [stage1_prompt_text],
+                is_initial_analysis=False, # This is part of detailed comparison, not initial one
+                user_prompt_for_history=stage1_user_prompt_for_history
+            )
 
-        ai_response_text = self.send_to_ai(
-            detailed_prompt_parts_for_genai,
-            is_initial_analysis=False,
-            user_prompt_for_history=user_prompt_for_history
-        )
+            if not parameters_response_text or parameters_response_text.startswith("AI Error:") or "empty/no content" in parameters_response_text :
+                self.update_conversation_history("System: Stage 1 Failed: Could not fetch relevant parameters from AI. Aborting detailed comparison.", role="error")
+                if not parameters_response_text: # send_to_ai might return None
+                     self.update_conversation_history("System: Failed to get parameters from AI (no response).", role="error")
+                return
 
-        if ai_response_text and not ai_response_text.startswith("AI Error:"):
-            self._populate_comparison_treeview(ai_response_text)
-        else:
-            if not ai_response_text:
-                 self.update_conversation_history("System: Failed to get detailed comparison from AI (no response).", role="error")
+            # Clean up parameter list - remove potential numbering, newlines, and make it a comma separated string
+            identified_parameters = re.sub(r"^\s*[\d.\-\s)]+\s*", "", parameters_response_text.strip(), flags=re.MULTILINE) # Remove leading numbers/bullets
+            identified_parameters = identified_parameters.replace('\n', ', ').replace(';',',').replace('，',',').strip() # Replace newlines/other separators with commas
+            identified_parameters = ", ".join(filter(None, [p.strip() for p in identified_parameters.split(',')])) # Ensure clean comma separation
 
-        if self.model and hasattr(self, 'start_comparison_button'):
-            self.start_comparison_button.config(state=tk.NORMAL)
+            if not identified_parameters:
+                self.update_conversation_history("System: Stage 1 Warning: AI did not return any parameters. Proceeding with general comparison.", role="system")
+                # Fallback: if AI returns no params, provide a generic list or let stage 2 proceed without specific guidance.
+                # For now, we'll let stage 2 proceed and it will ask for general differences.
+            else:
+                self.update_conversation_history(f"System: AI identified parameters: {identified_parameters}", role="system")
+
+            # Stage 2: Fetch Detailed Differences Based on Parameters
+            self.update_conversation_history(f"System: Stage 2: Fetching detailed differences for {mfg_pn1} vs {mfg_pn2} based on identified parameters...", role="system")
+
+            datasheet_sourcing_instruction = (
+                "IMPORTANT INSTRUCTIONS FOR AI RESPONSE:\n"
+                "- Base your answers primarily on the information extracted from the provided component datasheets "
+                "(text, images, and context from previous turns).\n"
+                "- If the datasheets lack specific information to answer a point, you may use your general knowledge.\n"
+                "- If you use general knowledge, you MUST explicitly state for which points the information was not found "
+                "in the datasheets and that your answer for those points is based on general understanding.\n"
+            )
+
+            stage2_prompt_parts = [
+                f"You are comparing two electronic components: MFG P/N 1: {mfg_pn1} and MFG P/N 2: {mfg_pn2}.\n\n"
+                "--- COMPONENT 1 DATASHEET TEXT START ---\n"
+                f"{self.spec_sheet_1_text}\n"
+                "--- COMPONENT 1 DATASHEET TEXT END ---\n\n"
+                "--- COMPONENT 2 DATASHEET TEXT START ---\n"
+                f"{self.spec_sheet_2_text}\n"
+                "--- COMPONENT 2 DATASHEET TEXT END ---\n\n",
+                datasheet_sourcing_instruction,
+            ]
+
+            if identified_parameters:
+                 stage2_prompt_parts.append(f"Focus on the following parameters that were identified for these components: {identified_parameters}.\n")
+            else:
+                 stage2_prompt_parts.append("Focus on crucial electrical and physical parameters relevant for comparing these specific component types.\n")
+
+            stage2_prompt_parts.extend([
+                "Based PRIMARILY on the provided datasheet texts above, please perform the following:",
+                "1. List all key specification differences (especially considering the parameters above if provided) in a clear, concise markdown table format. Ensure the table includes columns for Parameter, Value for Component 1, and Value for Component 2. Include a 'Notes' or 'Difference' column if applicable.",
+                "2. Explicitly state their full Operating Temperature ranges (e.g., -40°C to 125°C).",
+                "3. Assess SMT Compatibility: Can Component 2's package (based on its description in provided text/images - though prioritize the full texts now re-provided) likely be SMT'd onto Component 1's typical PCB footprint? Consider common package names and pin counts. State any assumptions clearly."
+            ])
+
+            stage2_user_prompt_for_history = (
+                f"User: Request for detailed specification differences, temp ranges, and SMT compatibility "
+                f"for {mfg_pn1} vs {mfg_pn2}"
+                f"{', based on parameters: ' + identified_parameters if identified_parameters else '.'}"
+            )
+
+            detailed_comparison_response_text = self.send_to_ai(
+                stage2_prompt_parts,
+                is_initial_analysis=False,
+                user_prompt_for_history=stage2_user_prompt_for_history
+            )
+
+            if detailed_comparison_response_text and not detailed_comparison_response_text.startswith("AI Error:"):
+                self._populate_comparison_treeview(detailed_comparison_response_text)
+            else:
+                if not detailed_comparison_response_text:
+                    self.update_conversation_history("System: Stage 2 Failed: Failed to get detailed comparison from AI (no response).", role="error")
+                # Error message already logged by send_to_ai if it starts with "AI Error:"
+        finally:
+            if self.model and hasattr(self, 'start_comparison_button'):
+                self.start_comparison_button.config(state=tk.NORMAL)
 
 
     def _parse_markdown_table(self, markdown_text: str) -> list:
@@ -349,7 +430,7 @@ class ComponentComparatorAI:
                             "component2": parts[2], "notes": parts[3] if len(parts) > 3 and parts[3] is not None else ""
                         })
             elif in_table_block: in_table_block = False
-        print(f"DEBUG: Parsed table data: {table_data}"); return table_data
+        return table_data
 
     def _populate_comparison_treeview(self, ai_response_text: str):
         if hasattr(self, 'comparison_treeview'):
@@ -600,7 +681,21 @@ class ComponentComparatorAI:
 
             self.update_conversation_history(f"System: Sending to AI ({active_model_name})...", role="system")
 
-            final_prompt_parts_for_sending = list(prompt_parts_for_ai) # Use a copy
+            datasheet_sourcing_instruction_text = (
+                "IMPORTANT INSTRUCTIONS FOR AI RESPONSE:\n"
+                "- Base your answers primarily on the information extracted from the provided component datasheets "
+                "(text, images, and context from previous conversation turns, including component type and MFG P/N if known).\n"
+                "- If the datasheets or prior conversation context lack specific information to answer your query, you may use your general knowledge.\n"
+                "- If you use general knowledge, you MUST explicitly state that the information was not found in the provided datasheets/context "
+                "and that your answer is based on general understanding.\n\n"
+            )
+
+            # Construct the prompt with sourcing instruction first, then user's actual content parts
+            prompt_with_sourcing_instruction = [datasheet_sourcing_instruction_text] + prompt_parts_for_ai
+
+            final_prompt_parts_for_sending = list(prompt_with_sourcing_instruction) # Use a copy
+
+            if hasattr(self, 'root'): self.root.update_idletasks()
             if self.translate_to_chinese_var.get():
                 translation_instruction = " Please provide your entire response in Chinese."
             else:
@@ -774,6 +869,7 @@ class ComponentComparatorAI:
         raw_ai_response_text = ""
 
         final_prompt_parts = list(prompt_parts) # Work with a copy
+        if hasattr(self, 'root'): self.root.update_idletasks()
         if self.translate_to_chinese_var.get():
             translation_instruction = " Please provide your entire response in Chinese."
         else:
@@ -824,6 +920,17 @@ class ComponentComparatorAI:
                 if hasattr(self, 'mfg_pn_var_2'):
                     self.mfg_pn_var_2.set(parsed_info['mfg_pn2'] if parsed_info['mfg_pn2'] != "Not Found" else "")
                     self.update_conversation_history(f"  MFG P/N 2 set to: {self.mfg_pn_var_2.get() or 'Not Found'}", role="system")
+
+                if hasattr(self, 'root'): self.root.update_idletasks()
+
+                # Force update Entry widgets UI
+                if hasattr(self, 'mfg_pn_entry_1'):
+                    self.mfg_pn_entry_1.delete(0, tk.END)
+                    self.mfg_pn_entry_1.insert(0, self.mfg_pn_var_1.get())
+
+                if hasattr(self, 'mfg_pn_entry_2'):
+                    self.mfg_pn_entry_2.delete(0, tk.END)
+                    self.mfg_pn_entry_2.insert(0, self.mfg_pn_var_2.get())
 
                 if hasattr(self, 'start_comparison_button'):
                     if parsed_info["is_similar_flag"] and not ("AI Error" in raw_ai_response_text or "empty/no content" in raw_ai_response_text) :
