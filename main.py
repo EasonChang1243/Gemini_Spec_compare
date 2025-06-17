@@ -381,7 +381,8 @@ class ComponentComparatorAI:
                 "Based PRIMARILY on the provided datasheet texts above, please perform the following:",
                 "1. List all key specification differences (especially considering the parameters above if provided) in a clear, concise markdown table format. Ensure the table includes columns for Parameter, Value for Component 1, and Value for Component 2. Include a 'Notes' or 'Difference' column if applicable.",
                 "2. Explicitly state their full Operating Temperature ranges (e.g., -40°C to 125°C).",
-                "3. Assess SMT Compatibility: Can Component 2's package (based on its description in provided text/images - though prioritize the full texts now re-provided) likely be SMT'd onto Component 1's typical PCB footprint? Consider common package names and pin counts. State any assumptions clearly."
+                "3. Assess SMT Compatibility: Can Component 2's package (based on its description in provided text/images - though prioritize the full texts now re-provided) likely be SMT'd onto Component 1's typical PCB footprint? Consider common package names and pin counts. State any assumptions clearly.",
+                "4. Package size including leads for two parts"
             ])
 
             stage2_user_prompt_for_history = (
