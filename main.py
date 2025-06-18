@@ -545,6 +545,62 @@ class ComponentComparatorAI:
             self.spec_sheet_2_label.config(text=f"File 2: {os.path.basename(self.spec_sheet_2_path) if self.spec_sheet_2_path else 'None'}")
 
     
+    def _is_text_segment_redundant_with_table(self, text_lines: list[str], table_data: dict) -> bool:
+        MAX_LINES_FOR_REDUNDANCY_CHECK = 5  # Max number of lines in a text block to check
+        MIN_REDUNDANCY_THRESHOLD_PERCENT = 0.75 # Min percentage of lines that must match table content
+
+        if not text_lines or not table_data or not table_data.get('rows'):
+            return False
+
+        actual_text_lines = [line for line in text_lines if line.strip()] # Non-empty lines
+        if not actual_text_lines: # No actual content in text_lines
+            return False
+
+        if len(actual_text_lines) > MAX_LINES_FOR_REDUNDANCY_CHECK:
+            return False # Text block too large for this simple heuristic
+
+        # Prepare normalized table content for efficient lookup
+        table_cell_texts = set()
+        if table_data.get('headers'):
+            for header in table_data['headers']:
+                table_cell_texts.add(str(header).strip().lower())
+        for row in table_data['rows']:
+            for cell in row:
+                table_cell_texts.add(str(cell).strip().lower())
+
+        if not table_cell_texts: # Table has no content to compare against
+            return False
+
+        redundant_lines_count = 0
+        for line_content in actual_text_lines:
+            normalized_line = line_content.strip().lower()
+
+            # Check 1: Exact match of the line in any table cell
+            if normalized_line in table_cell_texts:
+                redundant_lines_count += 1
+                continue
+
+            # Check 2: If line is "key: value" and both "key" and "value" (normalized) are in table cells
+            # This is a basic heuristic for common pattern.
+            if ':' in normalized_line:
+                parts = normalized_line.split(':', 1)
+                if len(parts) == 2:
+                    key = parts[0].strip()
+                    value = parts[1].strip()
+                    if key in table_cell_texts and value in table_cell_texts:
+                        redundant_lines_count += 1
+                        continue
+
+            # Check 3: If the entire line is made of words all present in the table (more loose)
+            # (Consider adding if above checks are too strict)
+            # For now, keeping it simpler.
+
+        if (float(redundant_lines_count) / len(actual_text_lines)) >= MIN_REDUNDANCY_THRESHOLD_PERCENT:
+            print(f"DEBUG: Text block identified as redundant. Lines: {len(actual_text_lines)}, Redundant: {redundant_lines_count}")
+            return True
+
+        return False
+
     def _format_ai_response(self, text_response: str) -> list:
         print(f"DEBUG: _format_ai_response_V2 INPUT START ===\n{{text_response}}\nDEBUG: _format_ai_response_V2 INPUT END ===")
         segments = []
@@ -558,11 +614,18 @@ class ComponentComparatorAI:
             
             if parsed_table_dict:
                 if current_text_block_lines:
-                    collected_text = "\n".join(current_text_block_lines).strip()
-                    if collected_text: 
-                        segments.append({'type': 'text', 'content': collected_text})
-                        print(f"DEBUG: _format_ai_response_V2: Added PRECEDING TEXT segment: '{{collected_text[:50]}}...'" )
-                    current_text_block_lines = [] 
+                    collected_text = "\n".join(current_text_block_lines).strip() # Keep collected_text for debug
+                    is_redundant_pre_text = False
+                    if segments and segments[-1]['type'] == 'table': # Check against previous segment if it was a table
+                            is_redundant_pre_text = self._is_text_segment_redundant_with_table(current_text_block_lines, segments[-1])
+
+                    if collected_text: # Ensure there's actual text
+                        if not is_redundant_pre_text:
+                            segments.append({'type': 'text', 'content': collected_text})
+                            print(f"DEBUG: _format_ai_response_V2: Added PRECEDING TEXT segment: '{{collected_text[:50]}}...'")
+                        else:
+                            print(f"DEBUG: Suppressed redundant PRECEDING text block: '{{collected_text[:50]}}...'")
+                    current_text_block_lines = []
                 
                 if parsed_table_dict.get('rows') is not None:
                     lines_consumed_by_parser = len(parsed_table_dict['rows']) + 2 # +2 for header and separator
@@ -580,10 +643,17 @@ class ComponentComparatorAI:
                 i += 1
 
         if current_text_block_lines:
-            collected_text = "\n".join(current_text_block_lines).strip()
-            if collected_text: 
-                segments.append({'type': 'text', 'content': collected_text})
-                print(f"DEBUG: _format_ai_response_V2: Added FINAL TEXT segment: '{{collected_text[:50]}}...'" )
+            is_redundant_final_text = False
+            if segments and segments[-1]['type'] == 'table': # Check if these lines are redundant w.r.t last added table
+                is_redundant_final_text = self._is_text_segment_redundant_with_table(current_text_block_lines, segments[-1])
+
+            collected_text_for_final_block = "\n".join(current_text_block_lines).strip()
+            if collected_text_for_final_block: # Ensure there's actual text
+                if not is_redundant_final_text:
+                    segments.append({'type': 'text', 'content': collected_text_for_final_block})
+                    print(f"DEBUG: _format_ai_response_V2: Added FINAL TEXT segment: '{{collected_text_for_final_block[:50]}}...'")
+                else:
+                    print(f"DEBUG: Suppressed redundant FINAL text block: '{{collected_text_for_final_block[:50]}}...'")
         
         print(f"DEBUG: _format_ai_response_V2: RETURNING segments (count {{len(segments)}}): {{segments}}")
         return segments
