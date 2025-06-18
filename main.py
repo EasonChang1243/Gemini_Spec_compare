@@ -554,8 +554,7 @@ class ComponentComparatorAI:
         
         while i < len(all_lines):
             print(f"DEBUG: _format_ai_response_V2: Loop top, i = {{i}}, line = '{{all_lines[i] if i < len(all_lines) else 'EOF'}}'")
-            parsed_table_dict, lines_consumed_by_parser = self._parse_markdown_table_from_string(all_lines, i)
-            print(f"DEBUG: _format_ai_response_V2: Parsed table: {{parsed_table_dict is not None}}, Lines consumed: {{lines_consumed_by_parser}}")
+            parsed_table_dict = self._parse_markdown_table("\n".join(all_lines[i:]))
             
             if parsed_table_dict:
                 if current_text_block_lines:
@@ -565,8 +564,13 @@ class ComponentComparatorAI:
                         print(f"DEBUG: _format_ai_response_V2: Added PRECEDING TEXT segment: '{{collected_text[:50]}}...'" )
                     current_text_block_lines = [] 
                 
+                if parsed_table_dict.get('rows') is not None:
+                    lines_consumed_by_parser = len(parsed_table_dict['rows']) + 2 # +2 for header and separator
+                else:
+                    # Assumes a table (even if empty of data rows) has a header and a separator line.
+                    lines_consumed_by_parser = 2
                 segments.append(parsed_table_dict) 
-                print(f"DEBUG: _format_ai_response_V2: Added TABLE segment. Headers: {{parsed_table_dict.get('headers')}}")
+                print(f"DEBUG: _format_ai_response_V2: Added TABLE segment. Headers: {{parsed_table_dict.get('headers')}}, Consumed approx: {{lines_consumed_by_parser}} lines")
                 i += lines_consumed_by_parser 
                 print(f"DEBUG: _format_ai_response_V2: Index i is now {{i}}")
                 continue 
