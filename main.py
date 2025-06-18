@@ -1,11 +1,3 @@
-"""
-Component Comparator AI
------------------------
-A Tkinter application for comparing electronic component specification sheets (PDFs)
-using Generative AI. Users can load two spec sheets, and the application will
-extract text and images to provide a comparative analysis using a selected AI model.
-The conversation history can be downloaded as a Word document.
-"""
 import tkinter as tk
 from tkinter import ttk, scrolledtext, filedialog
 import fitz  # PyMuPDF, for PDF processing
@@ -96,7 +88,7 @@ class ComponentComparatorAI:
         self.upload_image_button = None
         self.pending_user_image_path = None
         self.pending_user_image_pil = None
-        self.translate_to_chinese_var = tk.BooleanVar(value=True)
+        self.translate_to_chinese_var = tk.BooleanVar(value=False)
 
 
         self.temp_image_dir = "temp_images"; self._create_temp_image_dir()
@@ -200,6 +192,7 @@ class ComponentComparatorAI:
         self.translate_to_chinese_checkbutton = ttk.Checkbutton(
             self.user_input_controls_frame,
             text="AI replies in Chinese",
+            #variable=self.translate_to_chinese_var,  # 綁定變數
             command=self._handle_translate_chinese_checkbox_change, # Removed variable, added command
             onvalue=True,
             offvalue=False
@@ -339,7 +332,7 @@ class ComponentComparatorAI:
 
             # Clean up parameter list - remove potential numbering, newlines, and make it a comma separated string
             identified_parameters = re.sub(r"^\s*[\d.\-\s)]+\s*", "", parameters_response_text.strip(), flags=re.MULTILINE) # Remove leading numbers/bullets
-            identified_parameters = identified_parameters.replace('\n', ', ').replace(';',',').replace('，',',').strip() # Replace newlines/other separators with commas
+            identified_parameters = identified_parameters.replace('\n', ', ').replace(';','_').replace('，',',').strip() # Replace newlines/other separators with commas
             identified_parameters = ", ".join(filter(None, [p.strip() for p in identified_parameters.split(',')])) # Ensure clean comma separation
 
             if not identified_parameters:
@@ -396,7 +389,7 @@ class ComponentComparatorAI:
                 is_initial_analysis=False,
                 user_prompt_for_history=stage2_user_prompt_for_history
             )
-
+            print("DEBUG:",detailed_comparison_response_text)
             if detailed_comparison_response_text and not detailed_comparison_response_text.startswith("AI Error:"):
                 self._populate_comparison_treeview(detailed_comparison_response_text)
             else:
@@ -408,45 +401,125 @@ class ComponentComparatorAI:
                 self.start_comparison_button.config(state=tk.NORMAL)
 
 
-    def _parse_markdown_table(self, markdown_text: str) -> list:
-        table_data = []
-        lines = markdown_text.split('\n')
-        header_pattern = re.compile(r"^\s*\|([^|]+)\|([^|]+)\|([^|]+)\|([^|]+)?\|?\s*$")
-        separator_pattern = re.compile(r"^\s*\|?[-:|\s]+\|?\s*$")
-        in_table_block = False
-        for line in lines:
-            line = line.strip()
-            if not line:
-                if in_table_block: in_table_block = False
+    def _parse_markdown_table(self, markdown_text: str) -> dict or None:
+        # Filter out empty lines and strip whitespace
+        lines = [line.strip() for line in markdown_text.splitlines() if line.strip()]
+        if not lines:
+            return None
+
+        header_line_index = -1
+        header_line_text = "" # Initialize to empty string
+        separator_line_index = -1
+        
+        # USE THIS REGEX:
+        separator_pattern = r"^\s*\|(\s*[:\-]+\s*\|)*\s*[:\-]+\s*\|\s*$"
+
+        # Find header and separator lines
+        for i, current_line_text in enumerate(lines):
+            if not current_line_text.startswith('|') or not current_line_text.endswith('|'):
                 continue
-            if line.startswith('|') and line.endswith('|'):
-                in_table_block = True
-                if separator_pattern.match(line): continue
-                match = header_pattern.match(line)
-                if match:
-                    parts = [p.strip() for p in match.groups()]
-                    if len(parts) >= 3:
-                        table_data.append({
-                            "parameter": parts[0], "component1": parts[1],
-                            "component2": parts[2], "notes": parts[3] if len(parts) > 3 and parts[3] is not None else ""
-                        })
-            elif in_table_block: in_table_block = False
-        return table_data
+            # A header line must have at least one column, meaning at least 2 pipes.
+            if current_line_text.count('|') < 2: 
+                continue
+
+            if (i + 1) < len(lines):
+                next_line_text = lines[i+1].strip() # Ensure next_line is also stripped, though it should be from initial list comprehension
+                if re.fullmatch(separator_pattern, next_line_text):
+                    # Validate that the number of segments in separator matches number of headers
+                    temp_headers = [h.strip() for h in current_line_text[1:-1].split('|')]
+                    num_header_cols = len(temp_headers)
+
+                    # The separator line, if matched by the regex, is guaranteed to start and end with '|'.
+                    # So, the number of columns it defines is count_of_pipes - 1.
+                    num_separator_cols = next_line_text.count('|') - 1
+                    
+                    if num_header_cols == num_separator_cols and num_header_cols > 0: # Ensure at least one column
+                        header_line_index = i
+                        header_line_text = current_line_text
+                        separator_line_index = i + 1
+                        break
+        
+        if header_line_index == -1: # No valid header and separator pair found
+            return None
+
+        headers = [h.strip() for h in header_line_text[1:-1].split('|')]
+        num_cols = len(headers)
+        # num_cols will be > 0 due to the num_header_cols > 0 check above.
+
+        table_rows_data = []
+        # Process rows after the separator line
+        for i in range(separator_line_index + 1, len(lines)):
+            current_row_text = lines[i].strip() # Ensure row text is stripped, though it should be
+            if current_row_text.startswith('|') and current_row_text.endswith('|'):
+                # A row must have num_cols + 1 pipes to match the header structure.
+                if current_row_text.count('|') != num_cols + 1:
+                    # If pipe count doesn't match, assume end of table or a malformed row that doesn't fit.
+                    break 
+
+                cells = [cell.strip() for cell in current_row_text[1:-1].split('|')]
+                
+                # Cell padding/truncating logic (ensure it's robust if cells has unexpected length vs num_cols)
+                # Given the strict pipe check above, len(cells) should exactly match num_cols here.
+                # If the pipe check `current_row_text.count('|') != num_cols + 1` is removed or relaxed,
+                # then padding/truncation becomes critical.
+                # For now, assuming cells will have num_cols elements due to the pipe count check.
+                if len(cells) == num_cols:
+                     table_rows_data.append(cells)
+                else:
+                    # This case should ideally not be reached if the pipe count check is active and correct.
+                    # If it is reached, it implies a mismatch despite pipe count, or pipe check is flawed.
+                    # Pad or truncate as a fallback.
+                    if len(cells) < num_cols:
+                        cells.extend([""] * (num_cols - len(cells)))
+                    else: # len(cells) > num_cols
+                        cells = cells[:num_cols]
+                    table_rows_data.append(cells)
+            else:
+                # Line is not part of the table
+                break
+                
+        return {'type': 'table', 'headers': headers, 'rows': table_rows_data}
 
     def _populate_comparison_treeview(self, ai_response_text: str):
         if hasattr(self, 'comparison_treeview'):
             for item in self.comparison_treeview.get_children(): self.comparison_treeview.delete(item)
         else: self.update_conversation_history("System: Treeview not found.", role="error"); return
-        parsed_data = self._parse_markdown_table(ai_response_text)
-        if not parsed_data: self.update_conversation_history("System: No table data parsed for Treeview.", role="system"); return
+        
+        # Attempt to parse the response as a generic markdown table first
+        parsed_table_data = self._parse_markdown_table(ai_response_text)
+
+        if not parsed_table_data or not parsed_table_data['rows']:
+            self.update_conversation_history("System: No table data parsed for Treeview or table is empty.", role="system")
+            return
+
         pn1 = self.mfg_pn_var_1.get() or (os.path.basename(self.spec_sheet_1_path) if self.spec_sheet_1_path else "Comp 1")
         pn2 = self.mfg_pn_var_2.get() or (os.path.basename(self.spec_sheet_2_path) if self.spec_sheet_2_path else "Comp 2")
+        
+        # Adapt parsed_table_data for the existing treeview structure
+        # Assuming the table structure is Parameter | Comp1 Val | Comp2 Val | Notes
+        # Need to map headers to these roles if possible, or assume fixed column order for now
+        # For simplicity, let's assume the AI provides columns in the expected order for the treeview
+        
+        headers = parsed_table_data['headers']
+        # Update treeview column headings if they are generic enough or map them
+        # For now, we'll keep the original treeview headings and map data
+        # self.comparison_treeview.heading("parameter", text=headers[0] if len(headers) > 0 else "Parameter")
+        # self.comparison_treeview.heading("component1", text=headers[1] if len(headers) > 1 else pn1)
+        # self.comparison_treeview.heading("component2", text=headers[2] if len(headers) > 2 else pn2)
+        # self.comparison_treeview.heading("notes", text=headers[3] if len(headers) > 3 else "Notes")
+
         self.comparison_treeview.heading("component1", text=f"{pn1[:25]}{'...' if len(pn1)>25 else ''}")
         self.comparison_treeview.heading("component2", text=f"{pn2[:25]}{'...' if len(pn2)>25 else ''}")
-        for row in parsed_data:
-            self.comparison_treeview.insert("", tk.END, values=(
-                row.get("parameter", ""), row.get("component1", ""),
-                row.get("component2", ""), row.get("notes", "")))
+
+        for row_data in parsed_table_data['rows']:
+            # Map row_data list to the tuple expected by treeview.insert
+            # (parameter, component1_val, component2_val, notes)
+            parameter = row_data[0] if len(row_data) > 0 else ""
+            comp1_val = row_data[1] if len(row_data) > 1 else ""
+            comp2_val = row_data[2] if len(row_data) > 2 else ""
+            notes = row_data[3] if len(row_data) > 3 else ""
+            self.comparison_treeview.insert("", tk.END, values=(parameter, comp1_val, comp2_val, notes))
+            
         self.update_conversation_history("System: Detailed comparison table populated.", role="system")
 
     def load_spec_sheet_1(self):
@@ -471,77 +544,106 @@ class ComponentComparatorAI:
         else:
             self.spec_sheet_2_label.config(text=f"File 2: {os.path.basename(self.spec_sheet_2_path) if self.spec_sheet_2_path else 'None'}")
 
-    def _format_ai_response(self, text_response: str) -> str:
-        lines = text_response.split('\n')
-        formatted_output_lines = []
-        current_table_lines = []
-        in_table_block = False
+    
+    def _format_ai_response(self, text_response: str) -> list:
+        print(f"DEBUG: _format_ai_response_V2 INPUT START ===\n{{text_response}}\nDEBUG: _format_ai_response_V2 INPUT END ===")
+        segments = []
+        current_text_block_lines = []
+        all_lines = text_response.splitlines()
+        i = 0
+        
+        while i < len(all_lines):
+            print(f"DEBUG: _format_ai_response_V2: Loop top, i = {{i}}, line = '{{all_lines[i] if i < len(all_lines) else 'EOF'}}'")
+            parsed_table_dict, lines_consumed_by_parser = self._parse_markdown_table_from_string(all_lines, i)
+            print(f"DEBUG: _format_ai_response_V2: Parsed table: {{parsed_table_dict is not None}}, Lines consumed: {{lines_consumed_by_parser}}")
+            
+            if parsed_table_dict:
+                if current_text_block_lines:
+                    collected_text = "\n".join(current_text_block_lines).strip()
+                    if collected_text: 
+                        segments.append({'type': 'text', 'content': collected_text})
+                        print(f"DEBUG: _format_ai_response_V2: Added PRECEDING TEXT segment: '{{collected_text[:50]}}...'" )
+                    current_text_block_lines = [] 
+                
+                segments.append(parsed_table_dict) 
+                print(f"DEBUG: _format_ai_response_V2: Added TABLE segment. Headers: {{parsed_table_dict.get('headers')}}")
+                i += lines_consumed_by_parser 
+                print(f"DEBUG: _format_ai_response_V2: Index i is now {{i}}")
+                continue 
+            else:
+                current_text_block_lines.append(all_lines[i])
+                print(f"DEBUG: _format_ai_response_V2: Added to text block: '{{all_lines[i][:50]}}...'" )
+                i += 1
 
-        # Pattern to identify a markdown table separator line (e.g., |---|---| or |:---|:---:|)
-        separator_pattern = re.compile(r"^\s*\|?\s*([-:]+\|)+[-:]+\s*\|?\s*$")
-        # Pattern to identify a line that looks like a table row (starts and ends with |)
-        table_row_pattern = re.compile(r"^\s*\|.*\|\s*$")
+        if current_text_block_lines:
+            collected_text = "\n".join(current_text_block_lines).strip()
+            if collected_text: 
+                segments.append({'type': 'text', 'content': collected_text})
+                print(f"DEBUG: _format_ai_response_V2: Added FINAL TEXT segment: '{{collected_text[:50]}}...'" )
+        
+        print(f"DEBUG: _format_ai_response_V2: RETURNING segments (count {{len(segments)}}): {{segments}}")
+        return segments
 
-        def clean_cell_content(cell_text):
+    def clean_cell_content(cell_text):
             # Remove leading/trailing whitespace and markdown bold markers
             return cell_text.strip().replace("**", "")
 
-        def format_table(table_lines):
-            if not table_lines:
-                return ""
+    def format_table(table_lines):
+        if not table_lines:
+            return ""
 
-            parsed_table = []
-            for line in table_lines:
-                # Remove leading/trailing '|' and split by '|'
-                cells = [clean_cell_content(cell) for cell in line.strip()[1:-1].split('|')]
-                parsed_table.append(cells)
+        parsed_table_inner = [] # Renamed
+        for line_inner in table_lines: # Renamed
+            # Remove leading/trailing '|' and split by '|'
+            cells = [clean_cell_content(cell) for cell in line_inner.strip()[1:-1].split('|')]
+            parsed_table_inner.append(cells)
 
-            if not parsed_table:
-                return "\n".join(table_lines) # Should not happen if table_lines is not empty
+        if not parsed_table_inner:
+            return "\n".join(table_lines) # Should not happen if table_lines is not empty
 
-            num_cols = len(parsed_table[0])
-            # Ensure all rows have the same number of columns, pad if necessary
-            for row_idx, row in enumerate(parsed_table):
-                if len(row) < num_cols:
-                    parsed_table[row_idx].extend([""] * (num_cols - len(row)))
-                elif len(row) > num_cols: # Should ideally not happen with well-formed tables
-                    parsed_table[row_idx] = row[:num_cols]
-
-
-            col_widths = [0] * num_cols
-            for row in parsed_table:
-                for i, cell in enumerate(row):
-                    if i < num_cols: # Ensure we don't go out of bounds
-                        col_widths[i] = max(col_widths[i], len(cell))
-
-            formatted_table_str_lines = []
-            for i, row in enumerate(parsed_table):
-                formatted_row_parts = []
-                for j, cell in enumerate(row):
-                    if j < num_cols: # Ensure we don't go out of bounds
-                        # For separator row, create the separator line based on calculated widths
-                        if separator_pattern.match(table_lines[i].strip()): # Check original line for separator
-                            formatted_row_parts.append('-' * col_widths[j])
-                        else:
-                            formatted_row_parts.append(cell.ljust(col_widths[j]))
-                formatted_table_str_lines.append(" | ".join(formatted_row_parts))
-
-            # Re-add outer pipes for aesthetics if desired, or leave as is for simpler alignment
-            return "\n".join([f"| {s} |" for s in formatted_table_str_lines])
+        num_cols = len(parsed_table_inner[0])
+        # Ensure all rows have the same number of columns, pad if necessary
+        for row_idx, row_inner in enumerate(parsed_table_inner): # Renamed
+            if len(row_inner) < num_cols:
+                parsed_table_inner[row_idx].extend([""] * (num_cols - len(row_inner)))
+            elif len(row_inner) > num_cols: # Should ideally not happen with well-formed tables
+                parsed_table_inner[row_idx] = row_inner[:num_cols]
 
 
-        for i, line in enumerate(lines):
-            stripped_line = line.strip()
+        col_widths = [0] * num_cols
+        for row_inner_widths in parsed_table_inner: # Renamed
+            for i_cell, cell_content in enumerate(row_inner_widths): # Renamed
+                if i_cell < num_cols: # Ensure we don't go out of bounds
+                    col_widths[i_cell] = max(col_widths[i_cell], len(cell_content))
+
+        formatted_table_str_lines = []
+        for i_format_row, row_format_data in enumerate(parsed_table_inner): # Renamed
+            formatted_row_parts = []
+            for j_format_cell, cell_format_data in enumerate(row_format_data): # Renamed
+                if j_format_cell < num_cols: # Ensure we don't go out of bounds
+                    # For separator row, create the separator line based on calculated widths
+                    if separator_pattern_local.match(table_lines[i_format_row].strip()): # Check original line for separator
+                        formatted_row_parts.append('-' * col_widths[j_format_cell])
+                    else:
+                        formatted_row_parts.append(cell_format_data.ljust(col_widths[j_format_cell]))
+            formatted_table_str_lines.append(" | ".join(formatted_row_parts))
+
+        # Re-add outer pipes for aesthetics if desired, or leave as is for simpler alignment
+        return "\n".join([f"| {s} |" for s in formatted_table_str_lines])
+
+
+        for i_outer, line_outer in enumerate(lines): # Renamed
+            stripped_line = line_outer.strip()
 
             is_table_row_candidate = table_row_pattern.match(stripped_line)
-            is_separator = separator_pattern.match(stripped_line)
+            is_separator = separator_pattern_local.match(stripped_line)
 
             if is_table_row_candidate:
                 if not in_table_block:
                     # Check if this is the start of a new table
                     # Look ahead for a separator or more table rows
                     if is_separator or \
-                       (i + 1 < len(lines) and (separator_pattern.match(lines[i+1].strip()) or table_row_pattern.match(lines[i+1].strip()))):
+                       (i_outer + 1 < len(lines) and (separator_pattern_local.match(lines[i_outer+1].strip()) or table_row_pattern.match(lines[i_outer+1].strip()))):
                         in_table_block = True
                         current_table_lines.append(stripped_line)
                     else: # Not a table, just a line with pipes
@@ -555,23 +657,87 @@ class ComponentComparatorAI:
                     current_table_lines = []
                     in_table_block = False
                 # Add the non-table line (could be empty)
-                formatted_output_lines.append(line) # Keep original non-table lines
+                formatted_output_lines.append(line_outer) # Keep original non-table lines
 
         # If the response ends with a table block
         if in_table_block and current_table_lines:
             formatted_output_lines.append(format_table(current_table_lines))
 
-        return "\n".join(formatted_output_lines)
+        return "\n".join(formatted_output_lines) # This also needs to change
 
     def update_conversation_history(self, message, role="system"):
+        raw_message_for_log = message # Keep the original message for the log
+
         if hasattr(self, 'conversation_history') and self.conversation_history:
             self.conversation_history.config(state=tk.NORMAL)
             tag_to_apply = {"user": "user_message", "ai": "ai_message", "error": "error_message"}.get(role, "system_message")
-            display_message = self._format_ai_response(message) if role == "ai" else message
-            self.conversation_history.insert(tk.END, display_message + "\n", tag_to_apply)
+
+            if role == "ai":
+                formatted_content_or_segments = self._format_ai_response(raw_message_for_log) # Use raw message for formatting
+                
+                # This part needs to handle a list of segments
+                if isinstance(formatted_content_or_segments, list):
+                    for segment in formatted_content_or_segments:
+                        if segment['type'] == 'table':
+                            headers = segment.get('headers', [])
+                            rows = segment.get('rows', [])
+                            if headers: # Only proceed if there's actual table data
+                                table_frame = ttk.Frame(self.conversation_history)
+                                column_ids = [f"col_{i}" for i, _ in enumerate(headers)]
+                                tree = ttk.Treeview(table_frame, columns=column_ids, show="headings", height=len(rows) if rows else 1)
+                                for i, header_text in enumerate(headers):
+                                    tree.heading(column_ids[i], text=header_text.strip(), anchor=tk.W)
+                                    tree.column(column_ids[i], anchor=tk.W, width=100, stretch=tk.YES)
+                                for row_data in rows:
+                                    processed_row = []
+                                    for cell_idx, cell in enumerate(row_data):
+                                        if cell_idx < len(column_ids):
+                                            cell_text = str(cell).replace('\n', ' ').replace('<br>', ' ')
+                                            processed_row.append(cell_text)
+                                    tree.insert("", tk.END, values=processed_row)
+                                tree.pack(side=tk.LEFT, fill=tk.X, expand=True)
+                                self.conversation_history.insert(tk.END, '\n', tag_to_apply)
+                                self.conversation_history.window_create(tk.END, window=table_frame)
+                                self.conversation_history.insert(tk.END, '\n', tag_to_apply)
+                            else: # Empty table or malformed
+                                self.conversation_history.insert(tk.END, "AI Table (empty or malformed)\n", tag_to_apply)
+                        elif segment['type'] == 'text':
+                            self.conversation_history.insert(tk.END, segment['content'] + "\n", tag_to_apply)
+                elif isinstance(formatted_content_or_segments, dict) and formatted_content_or_segments.get('type') == 'table':
+                    # This case handles the old behavior where _format_ai_response might directly return one table
+                    # This should ideally be deprecated by the new list-based approach
+                    headers = formatted_content_or_segments.get('headers', [])
+                    rows = formatted_content_or_segments.get('rows', [])
+                    if headers: 
+                        table_frame = ttk.Frame(self.conversation_history)
+                        column_ids = [f"col_{i}" for i, _ in enumerate(headers)]
+                        tree = ttk.Treeview(table_frame, columns=column_ids, show="headings", height=len(rows) if rows else 1)
+                        for i, header_text in enumerate(headers):
+                            tree.heading(column_ids[i], text=header_text.strip(), anchor=tk.W)
+                            tree.column(column_ids[i], anchor=tk.W, width=100, stretch=tk.YES)
+                        for row_data in rows:
+                            processed_row = []
+                            for cell_idx, cell in enumerate(row_data):
+                                if cell_idx < len(column_ids):
+                                    cell_text = str(cell).replace('\n', ' ').replace('<br>', ' ')
+                                    processed_row.append(cell_text)
+                            tree.insert("", tk.END, values=processed_row)
+                        tree.pack(side=tk.LEFT, fill=tk.X, expand=True)
+                        self.conversation_history.insert(tk.END, '\n', tag_to_apply)
+                        self.conversation_history.window_create(tk.END, window=table_frame)
+                        self.conversation_history.insert(tk.END, '\n', tag_to_apply)
+                    else:
+                        self.conversation_history.insert(tk.END, "AI Table (empty or malformed)\n", tag_to_apply)
+                else: # It's formatted text (string) - old fallback
+                    self.conversation_history.insert(tk.END, str(formatted_content_or_segments) + "\n", tag_to_apply)
+            else: # User, system, error messages
+                display_message = raw_message_for_log
+                self.conversation_history.insert(tk.END, display_message + "\n", tag_to_apply)
+
             self.conversation_history.see(tk.END)
             self.conversation_history.config(state=tk.DISABLED)
-        self.conversation_log.append(message)
+        
+        self.conversation_log.append(raw_message_for_log)
 
     def _update_ui_for_ai_status(self, api_key_configured=None, model_initialized=None):
         if not hasattr(self, 'send_button'): return
@@ -966,5 +1132,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-[end of main.py]
