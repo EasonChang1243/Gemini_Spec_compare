@@ -546,80 +546,170 @@ class ComponentComparatorAI:
 
     
     def _is_text_segment_redundant_with_table(self, text_lines: list[str], table_data: dict) -> bool:
-        MAX_LINES_FOR_REDUNDANCY_CHECK = 5  # Max number of lines in a text block to check
-        MIN_REDUNDANCY_THRESHOLD_PERCENT = 0.75 # Min percentage of lines that must match table content
+        MAX_LINES_FOR_REDUNDANCY_CHECK = 7  # Increased slightly
+        MIN_REDUNDANCY_THRESHOLD_PERCENT = 0.75 # General threshold
+        MIN_REDUNDANCY_FOR_SECTION_MATCH = 0.51 # Threshold if section header matches table parameter (more lenient for content)
 
-        if not text_lines or not table_data or not table_data.get('rows'):
+        actual_text_lines = [line for line in text_lines if line.strip()]
+        if not actual_text_lines: # No actual content
             return False
 
-        actual_text_lines = [line for line in text_lines if line.strip()] # Non-empty lines
-        if not actual_text_lines: # No actual content in text_lines
-            return False
+        # If the block is larger than check limit, but first line is a strong header match, still check the first few lines.
+        is_potentially_headed_section = False
+        first_line_normalized_for_header_check = actual_text_lines[0].strip().lower()
+        if (first_line_normalized_for_header_check.startswith('**') and first_line_normalized_for_header_check.endswith('**') and len(first_line_normalized_for_header_check) > 4) or \
+           (first_line_normalized_for_header_check.startswith('## ') and len(first_line_normalized_for_header_check) > 3):
+            is_potentially_headed_section = True
 
-        if len(actual_text_lines) > MAX_LINES_FOR_REDUNDANCY_CHECK:
-            return False # Text block too large for this simple heuristic
+        if not is_potentially_headed_section and len(actual_text_lines) > MAX_LINES_FOR_REDUNDANCY_CHECK:
+            return False # Too large and not a recognized headed section for this heuristic
 
-        # Prepare normalized table content for efficient lookup
-        table_cell_texts = set()
-        if table_data.get('headers'):
-            for header in table_data['headers']:
-                table_cell_texts.add(str(header).strip().lower())
-        for row in table_data['rows']:
+        # If it's a headed section, take up to MAX_LINES_FOR_REDUNDANCY_CHECK for analysis
+        if is_potentially_headed_section and len(actual_text_lines) > MAX_LINES_FOR_REDUNDANCY_CHECK:
+            # This case is tricky. If a section starts with a matching header,
+            # but is very long, we might only want to suppress its short, redundant intro.
+            # For now, let's allow headed sections to be checked even if slightly longer,
+            # but the content check will be on lines_to_check_for_content.
+            # Or, we can truncate actual_text_lines for the check if it's a headed section.
+            # Let's stick to the original intent: check small blocks.
+            # If a headed section is too long, this heuristic won't make it redundant.
+            # This avoids suppressing large chunks of new analytical text.
+            pass # Allow longer headed sections to proceed to parameter matching, but content check is still on few lines.
+
+
+        table_headers_normalized = {str(h).strip().lower(): str(h).strip() for h in table_data.get('headers', [])} # Keep original case for potential later use
+        table_all_cells_normalized_set = set()
+        for row in table_data.get('rows', []):
             for cell in row:
-                table_cell_texts.add(str(cell).strip().lower())
+                table_all_cells_normalized_set.add(str(cell).strip().lower())
 
-        if not table_cell_texts: # Table has no content to compare against
+        if not table_all_cells_normalized_set and not table_headers_normalized: # Empty table
             return False
+
+        potential_section_title_normalized = None
+        first_line_orig_case = actual_text_lines[0].strip()
+
+        if first_line_orig_case.startswith('**') and first_line_orig_case.endswith('**') and len(first_line_orig_case) > 4:
+            potential_section_title_normalized = first_line_orig_case[2:-2].strip().lower()
+        elif first_line_orig_case.startswith('## ') and len(first_line_orig_case) > 3:
+            potential_section_title_normalized = first_line_orig_case[3:].strip().lower()
+
+        lines_to_check_for_content = actual_text_lines
+        # This set will contain specific cell values related to the matched parameter
+        focused_table_content_normalized = None
+        is_section_header_matched = False
+
+        if potential_section_title_normalized:
+            # Check if section title matches a table column header
+            if potential_section_title_normalized in table_headers_normalized:
+                is_section_header_matched = True
+                try:
+                    # Find column index of the matched header
+                    col_idx = -1
+                    for idx, header_val in enumerate(table_data.get('headers', [])):
+                        if str(header_val).strip().lower() == potential_section_title_normalized:
+                            col_idx = idx
+                            break
+                    if col_idx != -1:
+                        focused_table_content_normalized = {str(row[col_idx]).strip().lower() for row in table_data.get('rows', []) if len(row) > col_idx and str(row[col_idx]).strip()}
+                except Exception: # Broad catch for safety
+                    pass # Could not extract column data
+                lines_to_check_for_content = actual_text_lines[1:] # Content is lines after the header
+            else:
+                # Check if section title matches a parameter in the first column of any row
+                if table_data.get('rows') and len(table_data['rows'][0]) > 0:
+                    for row_data in table_data.get('rows', []):
+                        if str(row_data[0]).strip().lower() == potential_section_title_normalized:
+                            is_section_header_matched = True
+                            # Content is the rest of the cells in that row
+                            focused_table_content_normalized = {str(cell).strip().lower() for cell in row_data[1:] if str(cell).strip()}
+                            lines_to_check_for_content = actual_text_lines[1:]
+                            break
+
+        # If lines_to_check_for_content is empty after stripping header,
+        # and the header matched a table parameter, consider it redundant.
+        if is_section_header_matched and not [line for line in lines_to_check_for_content if line.strip()]:
+            print(f"DEBUG: Text block (header only) '{{actual_text_lines[0]}}' matched table parameter and has no further content. Suppressing.")
+            return True
+
+        # If after stripping header, the remaining lines exceed limit for non-headed section, don't suppress
+        if len([line for line in lines_to_check_for_content if line.strip()]) > MAX_LINES_FOR_REDUNDANCY_CHECK and not is_section_header_matched:
+             return False
+
 
         redundant_lines_count = 0
-        for line_content in actual_text_lines:
+        # Use focused content if available, otherwise broad check against all table cells
+        comparison_basis_set = focused_table_content_normalized if focused_table_content_normalized is not None else table_all_cells_normalized_set
+
+        if not comparison_basis_set: # No specific content to compare against for this section/parameter
+            if is_section_header_matched : # Header matched but no values found for it (e.g. empty column/row)
+                 print(f"DEBUG: Section header '{{potential_section_title_normalized}}' matched table, but no specific table content to compare for its body. Not suppressing body based on this rule.")
+                 return False # Don't suppress if no specific content to compare with, unless it was header-only.
+            # Fall through to general check if no header was matched, using table_all_cells_normalized_set
+
+
+        # Filter lines_to_check_for_content to only actual content lines and respect MAX_LINES for content part
+        content_lines_for_final_check = [line for line in lines_to_check_for_content if line.strip()][:MAX_LINES_FOR_REDUNDANCY_CHECK]
+        if not content_lines_for_final_check: # No content lines to check
+            return False
+
+        for line_content in content_lines_for_final_check:
             normalized_line = line_content.strip().lower()
+            # Check 1: Exact match of the line in comparison_basis_set
+            if normalized_line in comparison_basis_set:
+                redundant_lines_count += 1; continue
 
-            # Check 1: Exact match of the line in any table cell
-            if normalized_line in table_cell_texts:
-                redundant_lines_count += 1
-                continue
+            # Check 2: Substring check (line contains a table value, or a table value contains the line)
+            # This is a bit more generous.
+            found_substring_match = False
+            for table_val in comparison_basis_set:
+                if table_val and (table_val in normalized_line or normalized_line in table_val):
+                    found_substring_match = True; break
+            if found_substring_match:
+                redundant_lines_count += 1; continue
 
-            # Check 2: If line is "key: value" and both "key" and "value" (normalized) are in table cells
-            # This is a basic heuristic for common pattern.
-            if ':' in normalized_line:
+            # Check 3: (Only if not a specific section match, i.e., general check) "key: value" type
+            if focused_table_content_normalized is None and ':' in normalized_line:
                 parts = normalized_line.split(':', 1)
                 if len(parts) == 2:
-                    key = parts[0].strip()
-                    value = parts[1].strip()
-                    if key in table_cell_texts and value in table_cell_texts:
-                        redundant_lines_count += 1
-                        continue
+                    key_norm = parts[0].strip()
+                    val_norm = parts[1].strip()
+                    # Check if key is a table header and value is in any cell, or both in general cells
+                    if (key_norm in table_headers_normalized and val_norm in table_all_cells_normalized_set) or \
+                       (key_norm in table_all_cells_normalized_set and val_norm in table_all_cells_normalized_set):
+                        redundant_lines_count += 1; continue
 
-            # Check 3: If the entire line is made of words all present in the table (more loose)
-            # (Consider adding if above checks are too strict)
-            # For now, keeping it simpler.
+        current_threshold = MIN_REDUNDANCY_FOR_SECTION_MATCH if is_section_header_matched and focused_table_content_normalized is not None else MIN_REDUNDANCY_THRESHOLD_PERCENT
 
-        if (float(redundant_lines_count) / len(actual_text_lines)) >= MIN_REDUNDANCY_THRESHOLD_PERCENT:
-            print(f"DEBUG: Text block identified as redundant. Lines: {len(actual_text_lines)}, Redundant: {redundant_lines_count}")
+        if (float(redundant_lines_count) / len(content_lines_for_final_check)) >= current_threshold:
+            print(f"DEBUG: Text block identified as redundant. Lines checked: {{len(content_lines_for_final_check)}}, Redundant count: {{redundant_lines_count}}, Threshold: {{current_threshold}}, Header matched: {{is_section_header_matched}}")
             return True
 
         return False
 
     def _format_ai_response(self, text_response: str) -> list:
-        print(f"DEBUG: _format_ai_response_V2 INPUT START ===\n{{text_response}}\nDEBUG: _format_ai_response_V2 INPUT END ===")
         segments = []
         current_text_block_lines = []
         all_lines = text_response.splitlines()
         i = 0
-        
-        while i < len(all_lines):
-            print(f"DEBUG: _format_ai_response_V2: Loop top, i = {{i}}, line = '{{all_lines[i] if i < len(all_lines) else 'EOF'}}'")
-            parsed_table_dict = self._parse_markdown_table("\n".join(all_lines[i:]))
-            
-            if parsed_table_dict:
-                if current_text_block_lines:
-                    collected_text = "\n".join(current_text_block_lines).strip() # Keep collected_text for debug
-                    is_redundant_pre_text = False
-                    if segments and segments[-1]['type'] == 'table': # Check against previous segment if it was a table
-                            is_redundant_pre_text = self._is_text_segment_redundant_with_table(current_text_block_lines, segments[-1])
+        last_processed_table_segment = None
 
-                    if collected_text: # Ensure there's actual text
+        while i < len(all_lines):
+            line_to_process = all_lines[i]
+
+            # Attempt to parse a table starting from the current line 'i'
+            # Pass all_lines[i:] joined by newline to _parse_markdown_table
+            parsed_table_dict = self._parse_markdown_table("\n".join(all_lines[i:]))
+
+            if parsed_table_dict:
+                # Table found. Process any preceding text.
+                if current_text_block_lines:
+                    is_redundant_pre_text = False
+                    if last_processed_table_segment: # Check against the table processed *before* current_text_block_lines
+                        is_redundant_pre_text = self._is_text_segment_redundant_with_table(current_text_block_lines, last_processed_table_segment)
+
+                    collected_text = "\n".join(current_text_block_lines).strip()
+                    if collected_text:
                         if not is_redundant_pre_text:
                             segments.append({'type': 'text', 'content': collected_text})
                             print(f"DEBUG: _format_ai_response_V2: Added PRECEDING TEXT segment: '{{collected_text[:50]}}...'")
@@ -627,35 +717,53 @@ class ComponentComparatorAI:
                             print(f"DEBUG: Suppressed redundant PRECEDING text block: '{{collected_text[:50]}}...'")
                     current_text_block_lines = []
                 
-                if parsed_table_dict.get('rows') is not None:
-                    lines_consumed_by_parser = len(parsed_table_dict['rows']) + 2 # +2 for header and separator
-                else:
-                    # Assumes a table (even if empty of data rows) has a header and a separator line.
-                    lines_consumed_by_parser = 2
-                segments.append(parsed_table_dict) 
-                print(f"DEBUG: _format_ai_response_V2: Added TABLE segment. Headers: {{parsed_table_dict.get('headers')}}, Consumed approx: {{lines_consumed_by_parser}} lines")
-                i += lines_consumed_by_parser 
-                print(f"DEBUG: _format_ai_response_V2: Index i is now {{i}}")
-                continue 
-            else:
-                current_text_block_lines.append(all_lines[i])
-                print(f"DEBUG: _format_ai_response_V2: Added to text block: '{{all_lines[i][:50]}}...'" )
-                i += 1
+                # Add the newly parsed table
+                segments.append(parsed_table_dict)
+                last_processed_table_segment = parsed_table_dict # Update with the latest table
 
+                # Calculate lines consumed by this table to advance 'i'
+                if parsed_table_dict.get('rows') is not None:
+                    lines_consumed_by_table = len(parsed_table_dict['rows']) + 2 # +2 for header and separator
+                else:
+                    lines_consumed_by_table = 2 # Only header and separator
+                print(f"DEBUG: _format_ai_response_V2: Added TABLE segment. Headers: {{parsed_table_dict.get('headers')}}, Consumed approx: {{lines_consumed_by_table}} lines")
+                i += lines_consumed_by_table # Advance i past the processed table lines
+
+            else: # Line is not part of a new table
+                if not line_to_process.strip(): # Current line is blank, indicating a potential sub-segment break
+                    if current_text_block_lines: # Process accumulated lines as a sub-segment
+                        is_redundant_sub_segment = False
+                        if last_processed_table_segment: # Check against the last table seen
+                            is_redundant_sub_segment = self._is_text_segment_redundant_with_table(current_text_block_lines, last_processed_table_segment)
+
+                        collected_sub_segment_text = "\n".join(current_text_block_lines).strip()
+                        if collected_sub_segment_text:
+                            if not is_redundant_sub_segment:
+                                segments.append({'type': 'text', 'content': collected_sub_segment_text})
+                                print(f"DEBUG: _format_ai_response_V2: Added TEXT sub-segment (due to blank line): '{{collected_sub_segment_text[:50]}}...'")
+                            else:
+                                print(f"DEBUG: Suppressed redundant TEXT sub-segment (due to blank line): '{{collected_sub_segment_text[:50]}}...'")
+                        current_text_block_lines = [] # Reset for the next block
+                    # The blank line itself is not added to current_text_block_lines or segments
+                else: # Current line is not blank
+                    current_text_block_lines.append(line_to_process) # Add to current block
+
+                i += 1 # Advance to the next line
+
+        # After the loop, process any remaining lines in current_text_block_lines (final block)
         if current_text_block_lines:
             is_redundant_final_text = False
-            if segments and segments[-1]['type'] == 'table': # Check if these lines are redundant w.r.t last added table
-                is_redundant_final_text = self._is_text_segment_redundant_with_table(current_text_block_lines, segments[-1])
+            if last_processed_table_segment: # Check against the very last table processed
+                is_redundant_final_text = self._is_text_segment_redundant_with_table(current_text_block_lines, last_processed_table_segment)
 
             collected_text_for_final_block = "\n".join(current_text_block_lines).strip()
-            if collected_text_for_final_block: # Ensure there's actual text
+            if collected_text_for_final_block: # Ensure not adding an empty string
                 if not is_redundant_final_text:
                     segments.append({'type': 'text', 'content': collected_text_for_final_block})
                     print(f"DEBUG: _format_ai_response_V2: Added FINAL TEXT segment: '{{collected_text_for_final_block[:50]}}...'")
                 else:
                     print(f"DEBUG: Suppressed redundant FINAL text block: '{{collected_text_for_final_block[:50]}}...'")
-        
-        print(f"DEBUG: _format_ai_response_V2: RETURNING segments (count {{len(segments)}}): {{segments}}")
+
         return segments
 
     def clean_cell_content(cell_text):
