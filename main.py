@@ -1071,46 +1071,89 @@ class ComponentComparatorAI:
         finally: self._update_ui_for_ai_status()
 
     def download_history(self):
-        if not self.conversation_log: self.update_conversation_history("System: History empty.", role="system"); return
-        try: filepath = filedialog.asksaveasfilename(defaultextension=".docx", filetypes=[("Word Document", "*.docx"), ("All Files", "*.*")], title="Save History")
-        except Exception as e: self.update_conversation_history(f"System: Error opening save dialog: {e}", role="error"); return
-        if not filepath: self.update_conversation_history("System: Download cancelled.", role="system"); return
+        if not self.conversation_log:
+            self.update_conversation_history("System: History empty. Nothing to download.", role="system")
+            return
+
         try:
-            doc = docx.Document(); doc.add_heading("Component Comparator AI Chat History", level=1)
-            if self.spec_sheet_1_path: doc.add_paragraph(f"Spec Sheet 1: {os.path.basename(self.spec_sheet_1_path)}")
-            if self.spec_sheet_2_path: doc.add_paragraph(f"Spec Sheet 2: {os.path.basename(self.spec_sheet_2_path)}")
-            model_name = self.model.model_name if self.model and hasattr(self.model, 'model_name') else "N/A"
-            doc.add_paragraph(f"AI Model (last used): {model_name}"); doc.add_paragraph("-" * 20)
-            for entry in self.conversation_log:
-                parsed_table_data = self._parse_markdown_table(entry)
-                if parsed_table_data and parsed_table_data.get('headers') and parsed_table_data.get('rows'):
-                    headers = parsed_table_data['headers']
-                    data_rows = parsed_table_data['rows']
-                    num_cols = len(headers)
-                    # num_actual_data_rows = len(data_rows) # Not directly used in table creation with add_row
+            filepath = filedialog.asksaveasfilename(
+                defaultextension=".docx",
+                filetypes=[("Word Document", "*.docx"), ("All Files", "*.*")],
+                title="Save Conversation History"
+            )
+        except Exception as e:
+            self.update_conversation_history(f"System: Error opening save dialog: {e}", role="error")
+            return
 
-                    if num_cols > 0:
-                        word_table = doc.add_table(rows=1, cols=num_cols)
-                        word_table.style = 'TableGrid'
+        if not filepath:
+            self.update_conversation_history("System: Download cancelled by user.", role="system")
+            return
 
-                        for col_idx, header_text in enumerate(headers):
-                            word_table.cell(0, col_idx).text = str(header_text)
+        try:
+            # Ensure docx is imported, e.g., import docx at the top of main.py
+            doc = docx.Document()
+            doc.add_heading("Component Comparator AI Chat History", level=1)
 
-                        for data_row_list in data_rows:
-                            row_cells = word_table.add_row().cells
-                            for col_idx, cell_content in enumerate(data_row_list):
-                                if col_idx < num_cols:
-                                    row_cells[col_idx].text = str(cell_content)
+            if self.spec_sheet_1_path:
+                doc.add_paragraph(f"Spec Sheet 1: {os.path.basename(self.spec_sheet_1_path)}")
+            if self.spec_sheet_2_path:
+                doc.add_paragraph(f"Spec Sheet 2: {os.path.basename(self.spec_sheet_2_path)}")
 
-                        doc.add_paragraph('') # Add a blank line after the table for spacing
-                    else:
-                        # Fallback for table with no columns
-                        doc.add_paragraph(f"[Skipped adding empty/malformed table based on entry: '{entry[:100]}...']")
-                        doc.add_paragraph(entry) # Add the raw entry instead
-                else:
-                    doc.add_paragraph(entry)
-            doc.save(filepath); self.update_conversation_history(f"System: History downloaded to {filepath}", role="system")
-        except Exception as e: self.update_conversation_history(f"System: Error downloading: {e}", role="error"); print(f"Error saving .docx: {e}")
+            model_name_to_log = "N/A"
+            if self.model and hasattr(self.model, 'model_name'):
+                model_name_to_log = self.model.model_name
+            doc.add_paragraph(f"AI Model (last used): {model_name_to_log}")
+            doc.add_paragraph("-" * 20)
+
+            for entry_idx, entry_text in enumerate(self.conversation_log):
+                if not entry_text.strip():
+                    continue # Skip empty/whitespace-only log entries
+
+                segments = self._format_ai_response(entry_text)
+
+                if segments:
+                    for segment_idx, segment in enumerate(segments):
+                        segment_type = segment.get('type')
+
+                        if segment_type == 'table':
+                            headers = segment.get('headers', [])
+                            data_rows = segment.get('rows', [])
+                            num_cols = len(headers)
+
+                            if num_cols > 0 and data_rows:
+                                word_table = doc.add_table(rows=1, cols=num_cols)
+                                word_table.style = 'TableGrid'
+                                for col_idx, header_text_val in enumerate(headers):
+                                    word_table.cell(0, col_idx).text = str(header_text_val)
+                                for data_row_list in data_rows:
+                                    row_cells = word_table.add_row().cells
+                                    for col_idx, cell_content in enumerate(data_row_list):
+                                        if col_idx < num_cols:
+                                            row_cells[col_idx].text = str(cell_content)
+                                if segment_idx < len(segments) - 1:
+                                    doc.add_paragraph('')
+                            elif num_cols > 0 and not data_rows:
+                                doc.add_paragraph(f"[Table with headers: {', '.join(headers)}} - No data rows]")
+                                if segment_idx < len(segments) - 1:
+                                    doc.add_paragraph('')
+
+                        elif segment_type == 'text':
+                            text_content = segment.get('content', '')
+                            if text_content.strip():
+                                doc.add_paragraph(text_content)
+                                if segment_idx < len(segments) - 1:
+                                    doc.add_paragraph('')
+
+                elif entry_text.strip():
+                    doc.add_paragraph(f"[Unprocessed Entry]: {entry_text}")
+                    print(f"DEBUG: Download History - Entry resulted in no segments from _format_ai_response: {entry_text[:100]}...")
+            doc.save(filepath)
+            self.update_conversation_history(f"System: Conversation history downloaded to {filepath}", role="system")
+
+        except Exception as e:
+            error_message = f"System: Error during history download: {e}"
+            self.update_conversation_history(error_message, role="error")
+            print(f"DEBUG: Error saving .docx history: {e}")
 
     def clear_all(self, clear_files=True):
         print(f"DEBUG: clear_all called with clear_files={clear_files}")
