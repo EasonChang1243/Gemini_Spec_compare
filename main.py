@@ -1081,7 +1081,34 @@ class ComponentComparatorAI:
             if self.spec_sheet_2_path: doc.add_paragraph(f"Spec Sheet 2: {os.path.basename(self.spec_sheet_2_path)}")
             model_name = self.model.model_name if self.model and hasattr(self.model, 'model_name') else "N/A"
             doc.add_paragraph(f"AI Model (last used): {model_name}"); doc.add_paragraph("-" * 20)
-            for entry in self.conversation_log: doc.add_paragraph(entry)
+            for entry in self.conversation_log:
+                parsed_table_data = self._parse_markdown_table(entry)
+                if parsed_table_data and parsed_table_data.get('headers') and parsed_table_data.get('rows'):
+                    headers = parsed_table_data['headers']
+                    data_rows = parsed_table_data['rows']
+                    num_cols = len(headers)
+                    # num_actual_data_rows = len(data_rows) # Not directly used in table creation with add_row
+
+                    if num_cols > 0:
+                        word_table = doc.add_table(rows=1, cols=num_cols)
+                        word_table.style = 'TableGrid'
+
+                        for col_idx, header_text in enumerate(headers):
+                            word_table.cell(0, col_idx).text = str(header_text)
+
+                        for data_row_list in data_rows:
+                            row_cells = word_table.add_row().cells
+                            for col_idx, cell_content in enumerate(data_row_list):
+                                if col_idx < num_cols:
+                                    row_cells[col_idx].text = str(cell_content)
+
+                        doc.add_paragraph('') # Add a blank line after the table for spacing
+                    else:
+                        # Fallback for table with no columns
+                        doc.add_paragraph(f"[Skipped adding empty/malformed table based on entry: '{entry[:100]}...']")
+                        doc.add_paragraph(entry) # Add the raw entry instead
+                else:
+                    doc.add_paragraph(entry)
             doc.save(filepath); self.update_conversation_history(f"System: History downloaded to {filepath}", role="system")
         except Exception as e: self.update_conversation_history(f"System: Error downloading: {e}", role="error"); print(f"Error saving .docx: {e}")
 
