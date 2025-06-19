@@ -20,6 +20,7 @@ except ImportError:
 
 from PIL import Image, ImageTk, UnidentifiedImageError # Pillow for image handling
 import docx # For downloading history
+from docx.shared import RGBColor # For coloring text in Word
 from dotenv import load_dotenv # For loading .env files
 
 class Tooltip:
@@ -1448,6 +1449,646 @@ class ComponentComparatorAI:
             return f"AI Error: {e}"
         finally: self._update_ui_for_ai_status()
 
+    def download_history(self):
+        if not self.conversation_log:
+            self.update_conversation_history("System: History empty. Nothing to download.", role="system")
+            return
+
+        try:
+            filepath = filedialog.asksaveasfilename(
+                defaultextension=".docx",
+                filetypes=[("Word Document", "*.docx"), ("All Files", "*.*")],
+                title="Save Conversation History"
+            )
+        except Exception as e:
+            self.update_conversation_history(f"System: Error opening save dialog: {e}", role="error")
+            return
+
+        if not filepath:
+            self.update_conversation_history("System: Download cancelled by user.", role="system")
+            return
+
+        try:
+            # Ensure docx is imported, e.g., import docx at the top of main.py
+            doc = docx.Document()
+            doc.add_heading("Component Comparator AI Chat History", level=1)
+
+            if self.spec_sheet_1_path:
+                doc.add_paragraph(f"Spec Sheet 1: {os.path.basename(self.spec_sheet_1_path)}")
+            if self.spec_sheet_2_path:
+                doc.add_paragraph(f"Spec Sheet 2: {os.path.basename(self.spec_sheet_2_path)}")
+
+            model_name_to_log = "N/A"
+            if self.model and hasattr(self.model, 'model_name'):
+                model_name_to_log = self.model.model_name
+            doc.add_paragraph(f"AI Model (last used): {model_name_to_log}")
+            doc.add_paragraph("-" * 20)
+
+            for entry_idx, entry_text in enumerate(self.conversation_log):
+                if not entry_text.strip():
+                    continue # Skip empty/whitespace-only log entries
+
+                segments = self._format_ai_response(entry_text)
+
+                if segments:
+                    for segment_idx, segment in enumerate(segments):
+                        segment_type = segment.get('type')
+
+                        if segment_type == 'table':
+                            headers = segment.get('headers', [])
+                            data_rows = segment.get('rows', [])
+                            num_cols = len(headers)
+
+                            if num_cols > 0 and data_rows:
+                                word_table = doc.add_table(rows=1, cols=num_cols)
+                                word_table.style = 'TableGrid'
+                                for col_idx, header_text_val in enumerate(headers):
+                                    word_table.cell(0, col_idx).text = str(header_text_val)
+                                for data_row_list in data_rows:
+                                    row_cells = word_table.add_row().cells
+                                    for col_idx, cell_content in enumerate(data_row_list):
+                                        if col_idx < num_cols:
+                                            row_cells[col_idx].text = str(cell_content)
+                                if segment_idx < len(segments) - 1:
+                                    doc.add_paragraph('')
+                            elif num_cols > 0 and not data_rows:
+                                doc.add_paragraph(f"[Table with headers: {', '.join(headers)}} - No data rows]")
+                                if segment_idx < len(segments) - 1:
+                                    doc.add_paragraph('')
+
+                        elif segment_type == 'text':
+                            text_content = segment.get('content', '')
+                            if text_content.strip():
+                                doc.add_paragraph(text_content)
+                                if segment_idx < len(segments) - 1:
+                                    doc.add_paragraph('')
+
+                elif entry_text.strip():
+                    doc.add_paragraph(f"[Unprocessed Entry]: {entry_text}")
+                    print(f"DEBUG: Download History - Entry resulted in no segments from _format_ai_response: {entry_text[:100]}...")
+            doc.save(filepath)
+            self.update_conversation_history(f"System: Conversation history downloaded to {filepath}", role="system")
+
+        except Exception as e:
+            error_message = f"System: Error during history download: {e}"
+            self.update_conversation_history(error_message, role="error")
+            print(f"DEBUG: Error saving .docx history: {e}")
+
+    def clear_all(self, clear_files=True):
+        print(f"DEBUG: clear_all called with clear_files={clear_files}")
+        if clear_files:
+            self.spec_sheet_1_path=None; self.spec_sheet_1_text=None; self.spec_sheet_1_image_paths=[]
+            self.spec_sheet_2_path=None; self.spec_sheet_2_text=None; self.spec_sheet_2_image_paths=[]
+            if hasattr(self,'spec_sheet_1_label'): self.spec_sheet_1_label.config(text="File 1: None")
+            if hasattr(self,'spec_sheet_2_label'): self.spec_sheet_2_label.config(text="File 2: None")
+            if hasattr(self,'mfg_pn_var_1'): self.mfg_pn_var_1.set("")
+            if hasattr(self,'mfg_pn_var_2'): self.mfg_pn_var_2.set("")
+            if hasattr(self,'model_combobox'): self.model_combobox.set(self.placeholder_text); self.model_combobox.state(["disabled"])
+            if os.path.exists(self.temp_image_dir):
+                try: shutil.rmtree(self.temp_image_dir); print(f"DEBUG: Deleted temp dir: {self.temp_image_dir}")
+                except OSError as e: print(f"Error deleting temp dir {self.temp_image_dir}: {e}")
+            self._create_temp_image_dir()
+
+        self.pending_user_image_path = None
+        self.pending_user_image_pil = None
+
+        if hasattr(self,'conversation_history'): self.conversation_history.config(state=tk.NORMAL); self.conversation_history.delete(1.0, tk.END)
+        if hasattr(self,'comparison_treeview'):
+            for item in self.comparison_treeview.get_children(): self.comparison_treeview.delete(item)
+        self.conversation_log=[]; self.ai_history=[]
+        if clear_files: self.update_conversation_history("System: Welcome! Load PDFs to start.",role="system")
+        if hasattr(self,'user_input_entry'): self.user_input_entry.delete(0,tk.END)
+        self.model=None; self.chat_session=None
+        self._configure_ai()
+        if not clear_files and self.spec_sheet_1_path and self.spec_sheet_2_path:
+            if hasattr(self,'model_combobox'): self.model_combobox.config(state='readonly')
+            self.update_conversation_history("System: AI context cleared. Files remain. Select model.",role="system")
+        elif clear_files:
+             if hasattr(self,'model_combobox'): self.model_combobox.state(['disabled'])
+        if hasattr(self, 'start_comparison_button'): self.start_comparison_button.config(state=tk.DISABLED)
+        self._update_ui_for_ai_status(api_key_configured=self.api_key_configured,model_initialized=False)
+        print("DEBUG: Clear All finished.")
+
+    def extract_text_from_pdf(self, filepath):
+        if not filepath or not os.path.exists(filepath): self.update_conversation_history(f"System: PDF not found: {os.path.basename(filepath or 'Unknown')}", role="error"); return ""
+        try:
+            self.update_conversation_history(f"System: Extracting text from {os.path.basename(filepath)}...", role="system")
+            with fitz.open(filepath) as doc: text = "".join(page.get_text() for page in doc)
+            self.update_conversation_history(f"System: Text extraction OK: {os.path.basename(filepath)}.", role="system"); return text
+        except Exception as e: self.update_conversation_history(f"System: Error extracting text from {os.path.basename(filepath)}: {e}", role="error"); return ""
+
+    def extract_images_from_pdf(self, filepath, output_folder):
+        if not filepath or not os.path.exists(filepath): self.update_conversation_history(f"System: PDF not found: {os.path.basename(filepath or 'Unknown')}", role="error"); return []
+        paths = []
+        try:
+            self.update_conversation_history(f"System: Extracting images from {os.path.basename(filepath)}...", role="system")
+            if not os.path.exists(output_folder): os.makedirs(output_folder)
+            with fitz.open(filepath) as doc:
+                for i, page in enumerate(doc):
+                    for j, img_info in enumerate(page.get_images(full=True)):
+                        xref = img_info[0]
+                        try: base = doc.extract_image(xref)
+                        except Exception as e: self.update_conversation_history(f"System: Error extracting img xref {xref} pg {i+1}. Skip. Err: {e}", role="error"); continue
+                        img_bytes, ext = base["image"], base["ext"]
+                        path = os.path.join(output_folder, f"pg{i+1}_img{j+1}.{ext}")
+                        try:
+                            with open(path, "wb") as f: f.write(img_bytes)
+                            paths.append(path)
+                        except IOError as e: self.update_conversation_history(f"System: IOError saving image {path}. Error: {e}", role="error")
+            msg = f"System: Extracted {len(paths)} images from {os.path.basename(filepath)}." if paths else f"System: No images found in {os.path.basename(filepath)}."
+            self.update_conversation_history(msg, role="system"); return paths
+        except Exception as e: self.update_conversation_history(f"System: Error extracting images from {os.path.basename(filepath)}: {e}", role="error"); return []
+
+    def check_and_process_spec_sheets(self):
+        if not (self.spec_sheet_1_path and self.spec_sheet_2_path): return
+        if not self.api_key_configured: self.update_conversation_history("System: API Key not configured.", role="error"); return
+        if not self.model: self.update_conversation_history("System: AI Model not selected. Please select a model.", role="system"); return
+        self.update_conversation_history("System: Files and model active. Clearing old results...", role="system")
+        self.conversation_log = []; self.ai_history = []
+        if hasattr(self, 'conversation_history'): self.conversation_history.config(state=tk.NORMAL); self.conversation_history.delete(1.0, tk.END)
+        if hasattr(self, 'comparison_treeview'):
+            for item in self.comparison_treeview.get_children(): self.comparison_treeview.delete(item)
+        if self.api_key_configured: self.update_conversation_history("System: AI Configured.", role="system")
+        if self.model: self.update_conversation_history(f"System: Model '{self.model.model_name}' active.", role="system")
+        self.process_spec_sheets()
+
+    def process_spec_sheets(self):
+        if not self.model or not self.api_key_configured or not self.spec_sheet_1_path or not self.spec_sheet_2_path:
+            self.update_conversation_history("System: Pre-reqs not met (files, API key, model).", role="error"); return
+        self.update_conversation_history("System: Starting initial analysis...", role="system")
+        self.spec_sheet_1_text = self.extract_text_from_pdf(self.spec_sheet_1_path)
+        if not self.spec_sheet_1_text: self.update_conversation_history(f"System: Halting. Text extract fail: {os.path.basename(self.spec_sheet_1_path)}.", role="error"); return
+        s1_f = os.path.join(self.temp_image_dir, f"{os.path.splitext(os.path.basename(self.spec_sheet_1_path))[0]}_imgs_{len(os.listdir(self.temp_image_dir))}")
+        self.spec_sheet_1_image_paths = self.extract_images_from_pdf(self.spec_sheet_1_path, s1_f)
+        self.spec_sheet_2_text = self.extract_text_from_pdf(self.spec_sheet_2_path)
+        if not self.spec_sheet_2_text: self.update_conversation_history(f"System: Halting. Text extract fail: {os.path.basename(self.spec_sheet_2_path)}.", role="error"); return
+        s2_f = os.path.join(self.temp_image_dir, f"{os.path.splitext(os.path.basename(self.spec_sheet_2_path))[0]}_imgs_{len(os.listdir(self.temp_image_dir))}")
+        self.spec_sheet_2_image_paths = self.extract_images_from_pdf(self.spec_sheet_2_path, s2_f)
+
+        initial_analysis_prompt_text = (
+            "You are an expert electronics component analyst. Analyze the following two component specification sheets.\n\n"
+            "**Instructions for AI:**\n"
+            "1. For Component 1 (described first), identify its specific component type.\n"
+            "2. For Component 2 (described second), identify its specific component type.\n"
+            "3. Assess if Component 1 and Component 2 are functionally similar (e.g., both are dual N-channel MOSFETs, or one is an LDO regulator and the other a switching regulator, or one is a TVS diode and the other a Zener diode). Your assessment should be based on their primary function.\n"
+            "4. For Component 1, find and extract the first complete Manufacturer Part Number (MFG P/N) listed in its 'Order Information' or equivalent section. If multiple are listed, provide only the first one. If none is explicitly found, state 'Not Found'.\n"
+            "5. For Component 2, find and extract the first complete Manufacturer Part Number (MFG P/N) listed in its 'Order Information' or equivalent section. If multiple are listed, provide only the first one. If none is explicitly found, state 'Not Found'.\n\n"
+            "**Output Format:**\n"
+            "Please provide your response *only* in the following structured format, using these exact labels:\n"
+            "Component1_Type: [Type for component 1]\n"
+            "Component2_Type: [Type for component 2]\n"
+            "Functionally_Similar: [Yes/No, brief explanation]\n"
+            "MFG_PN1: [MFG P/N for component 1 or 'Not Found']\n"
+            "MFG_PN2: [MFG P/N for component 2 or 'Not Found']\n\n"
+            "**Component 1 Data:**\n"
+            f"Text Content:\n{self.spec_sheet_1_text}\n\n"
+            "**Component 2 Data:**\n"
+            f"Text Content:\n{self.spec_sheet_2_text}\n"
+        )
+
+        prompt_parts_for_genai = [initial_analysis_prompt_text]
+        # Add images for component 1
+        for img_path in self.spec_sheet_1_image_paths:
+            try: prompt_parts_for_genai.append(Image.open(img_path))
+            except Exception as e: self.update_conversation_history(f"System: Error loading image {img_path} for Comp 1. Skip. Err: {e}", role="error")
+        # Add images for component 2
+        prompt_parts_for_genai.append("\n--- End of Component 1 Images, Start of Component 2 Images (if any) ---") # Separator for clarity if needed
+        for img_path in self.spec_sheet_2_image_paths:
+            try: prompt_parts_for_genai.append(Image.open(img_path))
+            except Exception as e: self.update_conversation_history(f"System: Error loading image {img_path} for Comp 2. Skip. Err: {e}", role="error")
+
+        user_prompt_for_history_log = "User: Initial component type identification and MFG P/N extraction for spec sheets."
+        self.send_to_ai(prompt_parts_for_genai, is_initial_analysis=True, user_prompt_for_history=user_prompt_for_history_log)
+
+
+    def send_to_ai(self, prompt_parts, is_initial_analysis=False, user_prompt_for_history=None):
+        if not self.model: self.update_conversation_history("System: AI model N/A.", role="error"); return None
+        active_model_name = self.model.model_name
+        raw_ai_response_text = ""
+
+        final_prompt_parts = list(prompt_parts) # Work with a copy
+        if hasattr(self, 'root'): self.root.update_idletasks()
+        if self.translate_to_chinese_var.get():
+            translation_instruction = " Please provide your entire response in Chinese."
+        else:
+            translation_instruction = " Please provide your entire response in English."
+
+        appended_to_text = False
+        for i in range(len(final_prompt_parts) - 1, -1, -1):
+            if isinstance(final_prompt_parts[i], str):
+                final_prompt_parts[i] += translation_instruction
+                appended_to_text = True; break
+        if not appended_to_text: final_prompt_parts.append(translation_instruction)
+
+        try:
+            self.send_button.config(state=tk.DISABLED); self.user_input_entry.config(state=tk.DISABLED)
+            if hasattr(self, 'start_comparison_button'): self.start_comparison_button.config(state=tk.DISABLED)
+            self.update_conversation_history(f"System: Sending to AI ({active_model_name})... May take time.", role="system")
+
+            if is_initial_analysis and user_prompt_for_history:
+                 self._add_to_ai_history('user', user_prompt_for_history)
+
+            response = self.model.generate_content(final_prompt_parts, request_options={'timeout': 600})
+
+            if response.prompt_feedback and response.prompt_feedback.block_reason:
+                raw_ai_response_text = f"AI Error - Prompt was blocked. Reason: {response.prompt_feedback.block_reason}"
+                self.update_conversation_history(f"System: {raw_ai_response_text}", role="error")
+            elif not response.candidates or not hasattr(response, 'text') or not response.text:
+                raw_ai_response_text = "AI response empty/no content."
+                self.update_conversation_history(f"System: AI ({active_model_name}): {raw_ai_response_text}", role="system")
+            else:
+                raw_ai_response_text = response.text
+                self.update_conversation_history(f"AI ({active_model_name}): {raw_ai_response_text}", role="ai") # Display formatted
+
+            self._add_to_ai_history('model', raw_ai_response_text) # Log model's raw response or error
+
+            if is_initial_analysis:
+                self.chat_session = None
+                # Parse the response and update UI elements
+                parsed_info = self._parse_initial_analysis_response(raw_ai_response_text)
+
+                self.update_conversation_history(f"System: Initial Analysis Parsed Data:", role="system")
+                self.update_conversation_history(f"  Component 1 Type: {parsed_info['component1_type']}", role="system")
+                self.update_conversation_history(f"  Component 2 Type: {parsed_info['component2_type']}", role="system")
+                self.update_conversation_history(f"  Functionally Similar: {parsed_info['functionally_similar']}", role="system")
+
+                if hasattr(self, 'mfg_pn_var_1'):
+                    self.mfg_pn_var_1.set(parsed_info['mfg_pn1'] if parsed_info['mfg_pn1'] != "Not Found" else "")
+                    self.update_conversation_history(f"  MFG P/N 1 set to: {self.mfg_pn_var_1.get() or 'Not Found'}", role="system")
+                if hasattr(self, 'mfg_pn_var_2'):
+                    self.mfg_pn_var_2.set(parsed_info['mfg_pn2'] if parsed_info['mfg_pn2'] != "Not Found" else "")
+                    self.update_conversation_history(f"  MFG P/N 2 set to: {self.mfg_pn_var_2.get() or 'Not Found'}", role="system")
+
+                if hasattr(self, 'root'): self.root.update_idletasks()
+
+                # Force update Entry widgets UI
+                if hasattr(self, 'mfg_pn_entry_1'):
+                    self.mfg_pn_entry_1.delete(0, tk.END)
+                    self.mfg_pn_entry_1.insert(0, self.mfg_pn_var_1.get())
+
+                if hasattr(self, 'mfg_pn_entry_2'):
+                    self.mfg_pn_entry_2.delete(0, tk.END)
+                    self.mfg_pn_entry_2.insert(0, self.mfg_pn_var_2.get())
+
+                if hasattr(self, 'start_comparison_button'):
+                    if parsed_info["is_similar_flag"] and not ("AI Error" in raw_ai_response_text or "empty/no content" in raw_ai_response_text) :
+                        self.start_comparison_button.config(state=tk.NORMAL)
+                        self.update_conversation_history("System: Components appear functionally similar. 'Start Detailed Comparison' enabled.", role="system")
+                    else:
+                        self.start_comparison_button.config(state=tk.DISABLED)
+                        self.update_conversation_history("System: Components may not be functionally similar or analysis incomplete. Detailed comparison not enabled.", role="system")
+            return raw_ai_response_text
+        except Exception as e:
+            err_msg = f"System: Error with AI ({active_model_name}): {e}"
+            self.update_conversation_history(err_msg, role="error"); print(f"DEBUG: {err_msg}")
+            self._add_to_ai_history('model', f"Error: {e}")
+            if hasattr(self, 'start_comparison_button'): self.start_comparison_button.config(state=tk.DISABLED)
+            if isinstance(e, (google_exceptions.PermissionDenied,google_exceptions.Unauthenticated)): self.api_key_configured=False
+            if isinstance(e, (google_exceptions.InvalidArgument, ValueError, BlockedPromptException, StopCandidateException, google_exceptions.NotFound, google_exceptions.PermissionDenied)):
+                self.update_conversation_history(f"System: Resetting model ({active_model_name}) due to error.", role="system")
+                self.model = None; self.chat_session = None; self.ai_history = []
+            return f"AI Error: {e}"
+        finally: self._update_ui_for_ai_status()
+
+    def download_history(self):
+        if not self.conversation_log:
+            self.update_conversation_history("System: History empty. Nothing to download.", role="system")
+            return
+
+        try:
+            filepath = filedialog.asksaveasfilename(
+                defaultextension=".docx",
+                filetypes=[("Word Document", "*.docx"), ("All Files", "*.*")],
+                title="Save Conversation History"
+            )
+        except Exception as e:
+            self.update_conversation_history(f"System: Error opening save dialog: {e}", role="error")
+            return
+
+        if not filepath:
+            self.update_conversation_history("System: Download cancelled by user.", role="system")
+            return
+
+        try:
+            # Ensure docx is imported, e.g., import docx at the top of main.py
+            doc = docx.Document()
+            doc.add_heading("Component Comparator AI Chat History", level=1)
+
+            # Define colors (consider making these class constants or passing them in)
+            # from docx.shared import RGBColor # Ensure this import is at the top of main.py
+            USER_COLOR = RGBColor(0x00, 0x00, 0xFF)  # Blue
+            AI_COLOR = RGBColor(0x00, 0x80, 0x00)    # Green
+            SYSTEM_COLOR = RGBColor(0x80, 0x00, 0x80) # Purple
+            ERROR_COLOR = RGBColor(0xFF, 0x00, 0x00)   # Red
+            DEFAULT_COLOR = RGBColor(0x00, 0x00, 0x00) # Black (for unknown roles)
+
+            color_map = {
+                'user': USER_COLOR,
+                'ai': AI_COLOR,
+                'system': SYSTEM_COLOR,
+                'error': ERROR_COLOR
+            }
+
+            if self.spec_sheet_1_path:
+                p = doc.add_paragraph()
+                run = p.add_run(f"Spec Sheet 1: {os.path.basename(self.spec_sheet_1_path)}")
+                run.font.color.rgb = SYSTEM_COLOR # Example: Meta info in system color
+            if self.spec_sheet_2_path:
+                p = doc.add_paragraph()
+                run = p.add_run(f"Spec Sheet 2: {os.path.basename(self.spec_sheet_2_path)}")
+                run.font.color.rgb = SYSTEM_COLOR
+
+            model_name_to_log = "N/A"
+            if self.model and hasattr(self.model, 'model_name'):
+                model_name_to_log = self.model.model_name
+            p = doc.add_paragraph()
+            run = p.add_run(f"AI Model (last used): {model_name_to_log}")
+            run.font.color.rgb = SYSTEM_COLOR
+            doc.add_paragraph("-" * 20)
+
+            for entry_log_dict in self.conversation_log:
+                entry_role = entry_log_dict.get('role', 'system') # Default to system if role is missing
+                entry_content = entry_log_dict.get('content', '')
+
+                text_color = color_map.get(entry_role, DEFAULT_COLOR)
+
+                if not entry_content.strip(): # Skip effectively empty entries
+                    continue
+
+                # For AI messages, use _format_ai_response to get segments
+                # For other types, they are typically single text blocks.
+                # _format_ai_response should handle plain text by returning a single text segment.
+                segments = self._format_ai_response(entry_content)
+
+                if segments:
+                    for segment_idx, segment in enumerate(segments):
+                        segment_type = segment.get('type')
+
+                        if segment_type == 'table':
+                            headers = segment.get('headers', [])
+                            data_rows = segment.get('rows', [])
+                            num_cols = len(headers)
+
+                            if num_cols > 0 and data_rows:
+                                word_table = doc.add_table(rows=1, cols=num_cols)
+                                word_table.style = 'TableGrid'
+                                for col_idx, header_text_val in enumerate(headers):
+                                    cell_run = word_table.cell(0, col_idx).paragraphs[0].add_run(str(header_text_val))
+                                    cell_run.font.color.rgb = text_color # Color for table headers
+                                for data_row_list in data_rows:
+                                    row_cells = word_table.add_row().cells
+                                    for col_idx, cell_text_content in enumerate(data_row_list):
+                                        if col_idx < num_cols:
+                                            cell_run = row_cells[col_idx].paragraphs[0].add_run(str(cell_text_content))
+                                            cell_run.font.color.rgb = text_color # Color for table cells
+                                if segment_idx < len(segments) - 1:
+                                    doc.add_paragraph('')
+                            elif num_cols > 0 and not data_rows:
+                                p = doc.add_paragraph()
+                                run = p.add_run(f"[Table with headers: {', '.join(headers)}} - No data rows]")
+                                run.font.color.rgb = text_color # Use role color
+                                if segment_idx < len(segments) - 1:
+                                    doc.add_paragraph('')
+
+                        elif segment_type == 'text':
+                            current_text_content = segment.get('content', '')
+                            if current_text_content.strip():
+                                p = doc.add_paragraph()
+                                run = p.add_run(current_text_content)
+                                run.font.color.rgb = text_color
+                                if segment_idx < len(segments) - 1:
+                                    doc.add_paragraph('')
+
+                elif entry_content.strip(): # Fallback for non-empty entry if _format_ai_response yields no segments
+                    p = doc.add_paragraph()
+                    run = p.add_run(f"[Unprocessed Entry]: {entry_content}")
+                    run.font.color.rgb = ERROR_COLOR # Mark unprocessed entries in error color
+                    print(f"DEBUG: Download History - Entry was not processed into segments by _format_ai_response: {entry_content[:100]}...")
+
+            doc.save(filepath)
+            self.update_conversation_history(f"System: Conversation history downloaded to {filepath}", role="system")
+
+        except Exception as e:
+            error_message = f"System: Error during history download: {e}"
+            self.update_conversation_history(error_message, role="error")
+            print(f"DEBUG: Error saving .docx history: {e}")
+
+    def clear_all(self, clear_files=True):
+        print(f"DEBUG: clear_all called with clear_files={clear_files}")
+        if clear_files:
+            self.spec_sheet_1_path=None; self.spec_sheet_1_text=None; self.spec_sheet_1_image_paths=[]
+            self.spec_sheet_2_path=None; self.spec_sheet_2_text=None; self.spec_sheet_2_image_paths=[]
+            if hasattr(self,'spec_sheet_1_label'): self.spec_sheet_1_label.config(text="File 1: None")
+            if hasattr(self,'spec_sheet_2_label'): self.spec_sheet_2_label.config(text="File 2: None")
+            if hasattr(self,'mfg_pn_var_1'): self.mfg_pn_var_1.set("")
+            if hasattr(self,'mfg_pn_var_2'): self.mfg_pn_var_2.set("")
+            if hasattr(self,'model_combobox'): self.model_combobox.set(self.placeholder_text); self.model_combobox.state(["disabled"])
+            if os.path.exists(self.temp_image_dir):
+                try: shutil.rmtree(self.temp_image_dir); print(f"DEBUG: Deleted temp dir: {self.temp_image_dir}")
+                except OSError as e: print(f"Error deleting temp dir {self.temp_image_dir}: {e}")
+            self._create_temp_image_dir()
+
+        self.pending_user_image_path = None
+        self.pending_user_image_pil = None
+
+        if hasattr(self,'conversation_history'): self.conversation_history.config(state=tk.NORMAL); self.conversation_history.delete(1.0, tk.END)
+        if hasattr(self,'comparison_treeview'):
+            for item in self.comparison_treeview.get_children(): self.comparison_treeview.delete(item)
+        self.conversation_log=[]; self.ai_history=[]
+        if clear_files: self.update_conversation_history("System: Welcome! Load PDFs to start.",role="system")
+        if hasattr(self,'user_input_entry'): self.user_input_entry.delete(0,tk.END)
+        self.model=None; self.chat_session=None
+        self._configure_ai()
+        if not clear_files and self.spec_sheet_1_path and self.spec_sheet_2_path:
+            if hasattr(self,'model_combobox'): self.model_combobox.config(state='readonly')
+            self.update_conversation_history("System: AI context cleared. Files remain. Select model.",role="system")
+        elif clear_files:
+             if hasattr(self,'model_combobox'): self.model_combobox.state(['disabled'])
+        if hasattr(self, 'start_comparison_button'): self.start_comparison_button.config(state=tk.DISABLED)
+        self._update_ui_for_ai_status(api_key_configured=self.api_key_configured,model_initialized=False)
+        print("DEBUG: Clear All finished.")
+
+    def extract_text_from_pdf(self, filepath):
+        if not filepath or not os.path.exists(filepath): self.update_conversation_history(f"System: PDF not found: {os.path.basename(filepath or 'Unknown')}", role="error"); return ""
+        try:
+            self.update_conversation_history(f"System: Extracting text from {os.path.basename(filepath)}...", role="system")
+            with fitz.open(filepath) as doc: text = "".join(page.get_text() for page in doc)
+            self.update_conversation_history(f"System: Text extraction OK: {os.path.basename(filepath)}.", role="system"); return text
+        except Exception as e: self.update_conversation_history(f"System: Error extracting text from {os.path.basename(filepath)}: {e}", role="error"); return ""
+
+    def extract_images_from_pdf(self, filepath, output_folder):
+        if not filepath or not os.path.exists(filepath): self.update_conversation_history(f"System: PDF not found: {os.path.basename(filepath or 'Unknown')}", role="error"); return []
+        paths = []
+        try:
+            self.update_conversation_history(f"System: Extracting images from {os.path.basename(filepath)}...", role="system")
+            if not os.path.exists(output_folder): os.makedirs(output_folder)
+            with fitz.open(filepath) as doc:
+                for i, page in enumerate(doc):
+                    for j, img_info in enumerate(page.get_images(full=True)):
+                        xref = img_info[0]
+                        try: base = doc.extract_image(xref)
+                        except Exception as e: self.update_conversation_history(f"System: Error extracting img xref {xref} pg {i+1}. Skip. Err: {e}", role="error"); continue
+                        img_bytes, ext = base["image"], base["ext"]
+                        path = os.path.join(output_folder, f"pg{i+1}_img{j+1}.{ext}")
+                        try:
+                            with open(path, "wb") as f: f.write(img_bytes)
+                            paths.append(path)
+                        except IOError as e: self.update_conversation_history(f"System: IOError saving image {path}. Error: {e}", role="error")
+            msg = f"System: Extracted {len(paths)} images from {os.path.basename(filepath)}." if paths else f"System: No images found in {os.path.basename(filepath)}."
+            self.update_conversation_history(msg, role="system"); return paths
+        except Exception as e: self.update_conversation_history(f"System: Error extracting images from {os.path.basename(filepath)}: {e}", role="error"); return []
+
+    def check_and_process_spec_sheets(self):
+        if not (self.spec_sheet_1_path and self.spec_sheet_2_path): return
+        if not self.api_key_configured: self.update_conversation_history("System: API Key not configured.", role="error"); return
+        if not self.model: self.update_conversation_history("System: AI Model not selected. Please select a model.", role="system"); return
+        self.update_conversation_history("System: Files and model active. Clearing old results...", role="system")
+        self.conversation_log = []; self.ai_history = []
+        if hasattr(self, 'conversation_history'): self.conversation_history.config(state=tk.NORMAL); self.conversation_history.delete(1.0, tk.END)
+        if hasattr(self, 'comparison_treeview'):
+            for item in self.comparison_treeview.get_children(): self.comparison_treeview.delete(item)
+        if self.api_key_configured: self.update_conversation_history("System: AI Configured.", role="system")
+        if self.model: self.update_conversation_history(f"System: Model '{self.model.model_name}' active.", role="system")
+        self.process_spec_sheets()
+
+    def process_spec_sheets(self):
+        if not self.model or not self.api_key_configured or not self.spec_sheet_1_path or not self.spec_sheet_2_path:
+            self.update_conversation_history("System: Pre-reqs not met (files, API key, model).", role="error"); return
+        self.update_conversation_history("System: Starting initial analysis...", role="system")
+        self.spec_sheet_1_text = self.extract_text_from_pdf(self.spec_sheet_1_path)
+        if not self.spec_sheet_1_text: self.update_conversation_history(f"System: Halting. Text extract fail: {os.path.basename(self.spec_sheet_1_path)}.", role="error"); return
+        s1_f = os.path.join(self.temp_image_dir, f"{os.path.splitext(os.path.basename(self.spec_sheet_1_path))[0]}_imgs_{len(os.listdir(self.temp_image_dir))}")
+        self.spec_sheet_1_image_paths = self.extract_images_from_pdf(self.spec_sheet_1_path, s1_f)
+        self.spec_sheet_2_text = self.extract_text_from_pdf(self.spec_sheet_2_path)
+        if not self.spec_sheet_2_text: self.update_conversation_history(f"System: Halting. Text extract fail: {os.path.basename(self.spec_sheet_2_path)}.", role="error"); return
+        s2_f = os.path.join(self.temp_image_dir, f"{os.path.splitext(os.path.basename(self.spec_sheet_2_path))[0]}_imgs_{len(os.listdir(self.temp_image_dir))}")
+        self.spec_sheet_2_image_paths = self.extract_images_from_pdf(self.spec_sheet_2_path, s2_f)
+
+        initial_analysis_prompt_text = (
+            "You are an expert electronics component analyst. Analyze the following two component specification sheets.\n\n"
+            "**Instructions for AI:**\n"
+            "1. For Component 1 (described first), identify its specific component type.\n"
+            "2. For Component 2 (described second), identify its specific component type.\n"
+            "3. Assess if Component 1 and Component 2 are functionally similar (e.g., both are dual N-channel MOSFETs, or one is an LDO regulator and the other a switching regulator, or one is a TVS diode and the other a Zener diode). Your assessment should be based on their primary function.\n"
+            "4. For Component 1, find and extract the first complete Manufacturer Part Number (MFG P/N) listed in its 'Order Information' or equivalent section. If multiple are listed, provide only the first one. If none is explicitly found, state 'Not Found'.\n"
+            "5. For Component 2, find and extract the first complete Manufacturer Part Number (MFG P/N) listed in its 'Order Information' or equivalent section. If multiple are listed, provide only the first one. If none is explicitly found, state 'Not Found'.\n\n"
+            "**Output Format:**\n"
+            "Please provide your response *only* in the following structured format, using these exact labels:\n"
+            "Component1_Type: [Type for component 1]\n"
+            "Component2_Type: [Type for component 2]\n"
+            "Functionally_Similar: [Yes/No, brief explanation]\n"
+            "MFG_PN1: [MFG P/N for component 1 or 'Not Found']\n"
+            "MFG_PN2: [MFG P/N for component 2 or 'Not Found']\n\n"
+            "**Component 1 Data:**\n"
+            f"Text Content:\n{self.spec_sheet_1_text}\n\n"
+            "**Component 2 Data:**\n"
+            f"Text Content:\n{self.spec_sheet_2_text}\n"
+        )
+
+        prompt_parts_for_genai = [initial_analysis_prompt_text]
+        # Add images for component 1
+        for img_path in self.spec_sheet_1_image_paths:
+            try: prompt_parts_for_genai.append(Image.open(img_path))
+            except Exception as e: self.update_conversation_history(f"System: Error loading image {img_path} for Comp 1. Skip. Err: {e}", role="error")
+        # Add images for component 2
+        prompt_parts_for_genai.append("\n--- End of Component 1 Images, Start of Component 2 Images (if any) ---") # Separator for clarity if needed
+        for img_path in self.spec_sheet_2_image_paths:
+            try: prompt_parts_for_genai.append(Image.open(img_path))
+            except Exception as e: self.update_conversation_history(f"System: Error loading image {img_path} for Comp 2. Skip. Err: {e}", role="error")
+
+        user_prompt_for_history_log = "User: Initial component type identification and MFG P/N extraction for spec sheets."
+        self.send_to_ai(prompt_parts_for_genai, is_initial_analysis=True, user_prompt_for_history=user_prompt_for_history_log)
+
+
+    def send_to_ai(self, prompt_parts, is_initial_analysis=False, user_prompt_for_history=None):
+        if not self.model: self.update_conversation_history("System: AI model N/A.", role="error"); return None
+        active_model_name = self.model.model_name
+        raw_ai_response_text = ""
+
+        final_prompt_parts = list(prompt_parts) # Work with a copy
+        if hasattr(self, 'root'): self.root.update_idletasks()
+        if self.translate_to_chinese_var.get():
+            translation_instruction = " Please provide your entire response in Chinese."
+        else:
+            translation_instruction = " Please provide your entire response in English."
+
+        appended_to_text = False
+        for i in range(len(final_prompt_parts) - 1, -1, -1):
+            if isinstance(final_prompt_parts[i], str):
+                final_prompt_parts[i] += translation_instruction
+                appended_to_text = True; break
+        if not appended_to_text: final_prompt_parts.append(translation_instruction)
+
+        try:
+            self.send_button.config(state=tk.DISABLED); self.user_input_entry.config(state=tk.DISABLED)
+            if hasattr(self, 'start_comparison_button'): self.start_comparison_button.config(state=tk.DISABLED)
+            self.update_conversation_history(f"System: Sending to AI ({active_model_name})... May take time.", role="system")
+
+            if is_initial_analysis and user_prompt_for_history:
+                 self._add_to_ai_history('user', user_prompt_for_history)
+
+            response = self.model.generate_content(final_prompt_parts, request_options={'timeout': 600})
+
+            if response.prompt_feedback and response.prompt_feedback.block_reason:
+                raw_ai_response_text = f"AI Error - Prompt was blocked. Reason: {response.prompt_feedback.block_reason}"
+                self.update_conversation_history(f"System: {raw_ai_response_text}", role="error")
+            elif not response.candidates or not hasattr(response, 'text') or not response.text:
+                raw_ai_response_text = "AI response empty/no content."
+                self.update_conversation_history(f"System: AI ({active_model_name}): {raw_ai_response_text}", role="system")
+            else:
+                raw_ai_response_text = response.text
+                self.update_conversation_history(f"AI ({active_model_name}): {raw_ai_response_text}", role="ai") # Display formatted
+
+            self._add_to_ai_history('model', raw_ai_response_text) # Log model's raw response or error
+
+            if is_initial_analysis:
+                self.chat_session = None
+                # Parse the response and update UI elements
+                parsed_info = self._parse_initial_analysis_response(raw_ai_response_text)
+
+                self.update_conversation_history(f"System: Initial Analysis Parsed Data:", role="system")
+                self.update_conversation_history(f"  Component 1 Type: {parsed_info['component1_type']}", role="system")
+                self.update_conversation_history(f"  Component 2 Type: {parsed_info['component2_type']}", role="system")
+                self.update_conversation_history(f"  Functionally Similar: {parsed_info['functionally_similar']}", role="system")
+
+                if hasattr(self, 'mfg_pn_var_1'):
+                    self.mfg_pn_var_1.set(parsed_info['mfg_pn1'] if parsed_info['mfg_pn1'] != "Not Found" else "")
+                    self.update_conversation_history(f"  MFG P/N 1 set to: {self.mfg_pn_var_1.get() or 'Not Found'}", role="system")
+                if hasattr(self, 'mfg_pn_var_2'):
+                    self.mfg_pn_var_2.set(parsed_info['mfg_pn2'] if parsed_info['mfg_pn2'] != "Not Found" else "")
+                    self.update_conversation_history(f"  MFG P/N 2 set to: {self.mfg_pn_var_2.get() or 'Not Found'}", role="system")
+
+                if hasattr(self, 'root'): self.root.update_idletasks()
+
+                # Force update Entry widgets UI
+                if hasattr(self, 'mfg_pn_entry_1'):
+                    self.mfg_pn_entry_1.delete(0, tk.END)
+                    self.mfg_pn_entry_1.insert(0, self.mfg_pn_var_1.get())
+
+                if hasattr(self, 'mfg_pn_entry_2'):
+                    self.mfg_pn_entry_2.delete(0, tk.END)
+                    self.mfg_pn_entry_2.insert(0, self.mfg_pn_var_2.get())
+
+                if hasattr(self, 'start_comparison_button'):
+                    if parsed_info["is_similar_flag"] and not ("AI Error" in raw_ai_response_text or "empty/no content" in raw_ai_response_text) :
+                        self.start_comparison_button.config(state=tk.NORMAL)
+                        self.update_conversation_history("System: Components appear functionally similar. 'Start Detailed Comparison' enabled.", role="system")
+                    else:
+                        self.start_comparison_button.config(state=tk.DISABLED)
+                        self.update_conversation_history("System: Components may not be functionally similar or analysis incomplete. Detailed comparison not enabled.", role="system")
+            return raw_ai_response_text
+        except Exception as e:
+            err_msg = f"System: Error with AI ({active_model_name}): {e}"
+            self.update_conversation_history(err_msg, role="error"); print(f"DEBUG: {err_msg}")
+            self._add_to_ai_history('model', f"Error: {e}")
+            if hasattr(self, 'start_comparison_button'): self.start_comparison_button.config(state=tk.DISABLED)
+            if isinstance(e, (google_exceptions.PermissionDenied,google_exceptions.Unauthenticated)): self.api_key_configured=False
+            if isinstance(e, (google_exceptions.InvalidArgument, ValueError, BlockedPromptException, StopCandidateException, google_exceptions.NotFound, google_exceptions.PermissionDenied)):
+                self.update_conversation_history(f"System: Resetting model ({active_model_name}) due to error.", role="system")
+                self.model = None; self.chat_session = None; self.ai_history = []
+            return f"AI Error: {e}"
+        finally: self._update_ui_for_ai_status()
+
 def main():
     try:
         s = ttk.Style(); available_themes = s.theme_names()
@@ -1461,3 +2102,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+[end of main.py]
