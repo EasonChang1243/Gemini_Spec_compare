@@ -480,6 +480,76 @@ class ComponentComparatorAI:
                 
         return {'type': 'table', 'headers': headers, 'rows': table_rows_data}
 
+    def _parse_implicit_table(self, text_lines: list[str]) -> dict or None:
+        MIN_IMPLICIT_TABLE_ROWS = 2 # Minimum number of qualifying lines to form a table
+        # Regex to capture key and value parts. Allows for optional whitespace around colon.
+        # Key is group 1, Value is group 2.
+        # Key can be anything up to the colon. Value is everything after.
+        KEY_VALUE_SEPARATOR_PATTERN = re.compile(r"^\s*(.+?)\s*:\s*(.+)\s*$")
+
+        if not text_lines or len(text_lines) < MIN_IMPLICIT_TABLE_ROWS:
+            return None
+
+        parsed_rows_data = []
+        expected_num_value_cols = -1 # Undetermined initially
+
+        # Find the first valid line to determine column count and start the table
+        start_line_idx = -1
+        first_row_candidate = []
+
+        for idx, line in enumerate(text_lines):
+            line_stripped = line.strip()
+            if not line_stripped: # Skip blank lines between potential data lines
+                if start_line_idx != -1 and not parsed_rows_data: # Blank line before any valid rows collected after start
+                    start_line_idx = -1 # Reset start if a blank line interrupts before min rows
+                continue
+
+            match = KEY_VALUE_SEPARATOR_PATTERN.match(line_stripped)
+            if match:
+                key_part = match.group(1).strip()
+                value_part = match.group(2).strip()
+
+                # Split value_part by comma, trim spaces from each cell
+                value_cells = [v.strip() for v in value_part.split(',')]
+
+                if not value_cells or not value_cells[0]: # Value part must exist
+                    if start_line_idx != -1: # If we were already building a table
+                        break # Invalid line, stop table parsing here
+                    else: continue # Keep searching for a valid start line
+
+                current_row_values = [key_part] + value_cells
+                num_value_cols_this_line = len(value_cells)
+
+                if start_line_idx == -1: # This is the first valid line candidate
+                    start_line_idx = idx
+                    expected_num_value_cols = num_value_cols_this_line
+                    parsed_rows_data.append(current_row_values)
+                elif num_value_cols_this_line == expected_num_value_cols:
+                    # This line matches the expected column structure
+                    parsed_rows_data.append(current_row_values)
+                else:
+                    # Line does not match column structure, table ends here
+                    break
+            else:
+                # Line does not match "Key: Value" pattern.
+                if start_line_idx != -1: # If we were already building a table
+                    break # Non-matching line, stop table parsing here
+                # else: continue searching for a start line (handles leading non-matching lines)
+
+        if len(parsed_rows_data) >= MIN_IMPLICIT_TABLE_ROWS:
+            # Construct headers
+            headers = ["Parameter"]
+            for i in range(expected_num_value_cols):
+                # Using "Value {i+1}" but could be "Comp {i+1}" etc. if context allows
+                headers.append(f"Value {i+1}")
+
+            # The number of lines consumed by this implicit table is tricky if there were interspersed blank lines
+            # or leading/trailing non-matching lines. For now, this function doesn't return consumed lines.
+            # _format_ai_response will have to manage line consumption more carefully if this parser is used.
+            return {'type': 'table', 'headers': headers, 'rows': parsed_rows_data}
+
+        return None
+
     def _populate_comparison_treeview(self, ai_response_text: str):
         if hasattr(self, 'comparison_treeview'):
             for item in self.comparison_treeview.get_children(): self.comparison_treeview.delete(item)
@@ -687,83 +757,90 @@ class ComponentComparatorAI:
 
         return False
 
+    def _finalize_text_block(self, block_lines: list[str], last_table_segment_for_redundancy_check: dict or None) -> dict or None:
+        if not [line for line in block_lines if line.strip()]: # Check if block_lines contains any non-whitespace lines
+            return None
+
+        # Try parsing as an implicit table first
+        # Note: _parse_implicit_table expects a list of strings.
+        implicit_table = self._parse_implicit_table(block_lines)
+        if implicit_table:
+            # Optional: Could add a redundancy check for implicit_table against last_table_segment_for_redundancy_check
+            # For now, assume implicit tables are distinct enough or this check is too complex here.
+            # The main redundancy check (_is_text_segment_redundant_with_table) is designed for text vs table.
+            print(f"DEBUG: _finalize_text_block: Added IMPLICIT TABLE. Headers: {implicit_table.get('headers')}")
+            return implicit_table # This dict already includes {'type': 'table'}
+
+        # If not an implicit table, treat as a text segment
+        collected_text = "\n".join(block_lines).strip()
+        if collected_text: # Ensure there's actual content
+            is_redundant = False
+            if last_table_segment_for_redundancy_check:
+                # _is_text_segment_redundant_with_table expects list of lines for its text input
+                is_redundant = self._is_text_segment_redundant_with_table(block_lines, last_table_segment_for_redundancy_check)
+
+            if not is_redundant:
+                print(f"DEBUG: _finalize_text_block: Added TEXT segment: '{collected_text[:70]}...'")
+                return {'type': 'text', 'content': collected_text}
+            else:
+                # Suppressed text block due to redundancy
+                print(f"DEBUG: _finalize_text_block: Suppressed redundant TEXT segment: '{collected_text[:70]}...'")
+        return None
+
     def _format_ai_response(self, text_response: str) -> list:
         segments = []
-        current_text_block_lines = []
+        current_text_block_lines = [] # Accumulates lines for a potential text or implicit table segment
         all_lines = text_response.splitlines()
         i = 0
-        last_processed_table_segment = None
+        last_processed_table_segment = None # For redundancy checks of text vs preceding table
 
         while i < len(all_lines):
-            line_to_process = all_lines[i]
+            # Check for a standard markdown (pipe) table starting at the current line
+            # _parse_markdown_table expects a single string, so we join lines from current position
+            pipe_table_data = self._parse_markdown_table("\n".join(all_lines[i:]))
 
-            # Attempt to parse a table starting from the current line 'i'
-            # Pass all_lines[i:] joined by newline to _parse_markdown_table
-            parsed_table_dict = self._parse_markdown_table("\n".join(all_lines[i:]))
-
-            if parsed_table_dict:
-                # Table found. Process any preceding text.
+            if pipe_table_data:
+                # A pipe table was found. First, finalize any text block accumulated *before* this pipe table.
                 if current_text_block_lines:
-                    is_redundant_pre_text = False
-                    if last_processed_table_segment: # Check against the table processed *before* current_text_block_lines
-                        is_redundant_pre_text = self._is_text_segment_redundant_with_table(current_text_block_lines, last_processed_table_segment)
+                    processed_segment = self._finalize_text_block(current_text_block_lines, last_processed_table_segment)
+                    if processed_segment:
+                        segments.append(processed_segment)
+                        if processed_segment['type'] == 'table': # This would be an implicit table
+                            last_processed_table_segment = processed_segment
+                    current_text_block_lines = [] # Reset buffer
 
-                    collected_text = "\n".join(current_text_block_lines).strip()
-                    if collected_text:
-                        if not is_redundant_pre_text:
-                            segments.append({'type': 'text', 'content': collected_text})
-                            print(f"DEBUG: _format_ai_response_V2: Added PRECEDING TEXT segment: '{{collected_text[:50]}}...'")
-                        else:
-                            print(f"DEBUG: Suppressed redundant PRECEDING text block: '{{collected_text[:50]}}...'")
-                    current_text_block_lines = []
+                # Now, add the pipe table itself
+                segments.append(pipe_table_data)
+                last_processed_table_segment = pipe_table_data # Update for next redundancy checks
                 
-                # Add the newly parsed table
-                segments.append(parsed_table_dict)
-                last_processed_table_segment = parsed_table_dict # Update with the latest table
+                # Calculate lines consumed by this pipe_table for advancing 'i'
+                lines_consumed_by_pipe_table = len(pipe_table_data.get('rows', [])) + 2 # +2 for header and separator
+                print(f"DEBUG: _format_ai_response: Added PIPE TABLE segment. Headers: {pipe_table_data.get('headers')}, Consumed approx: {lines_consumed_by_pipe_table} lines")
+                i += lines_consumed_by_pipe_table
 
-                # Calculate lines consumed by this table to advance 'i'
-                if parsed_table_dict.get('rows') is not None:
-                    lines_consumed_by_table = len(parsed_table_dict['rows']) + 2 # +2 for header and separator
-                else:
-                    lines_consumed_by_table = 2 # Only header and separator
-                print(f"DEBUG: _format_ai_response_V2: Added TABLE segment. Headers: {{parsed_table_dict.get('headers')}}, Consumed approx: {{lines_consumed_by_table}} lines")
-                i += lines_consumed_by_table # Advance i past the processed table lines
+            else: # No pipe table starts at all_lines[i]
+                line = all_lines[i]
+                if not line.strip(): # Current line is blank, signifies end of a text block
+                    if current_text_block_lines:
+                        processed_segment = self._finalize_text_block(current_text_block_lines, last_processed_table_segment)
+                        if processed_segment:
+                            segments.append(processed_segment)
+                            if processed_segment['type'] == 'table': # Implicit table
+                                last_processed_table_segment = processed_segment
+                        current_text_block_lines = [] # Reset buffer
+                else: # Non-blank line, add to current text block
+                    current_text_block_lines.append(line)
+                i += 1 # Move to the next line
 
-            else: # Line is not part of a new table
-                if not line_to_process.strip(): # Current line is blank, indicating a potential sub-segment break
-                    if current_text_block_lines: # Process accumulated lines as a sub-segment
-                        is_redundant_sub_segment = False
-                        if last_processed_table_segment: # Check against the last table seen
-                            is_redundant_sub_segment = self._is_text_segment_redundant_with_table(current_text_block_lines, last_processed_table_segment)
-
-                        collected_sub_segment_text = "\n".join(current_text_block_lines).strip()
-                        if collected_sub_segment_text:
-                            if not is_redundant_sub_segment:
-                                segments.append({'type': 'text', 'content': collected_sub_segment_text})
-                                print(f"DEBUG: _format_ai_response_V2: Added TEXT sub-segment (due to blank line): '{{collected_sub_segment_text[:50]}}...'")
-                            else:
-                                print(f"DEBUG: Suppressed redundant TEXT sub-segment (due to blank line): '{{collected_sub_segment_text[:50]}}...'")
-                        current_text_block_lines = [] # Reset for the next block
-                    # The blank line itself is not added to current_text_block_lines or segments
-                else: # Current line is not blank
-                    current_text_block_lines.append(line_to_process) # Add to current block
-
-                i += 1 # Advance to the next line
-
-        # After the loop, process any remaining lines in current_text_block_lines (final block)
+        # After the loop, finalize any remaining lines in current_text_block_lines
         if current_text_block_lines:
-            is_redundant_final_text = False
-            if last_processed_table_segment: # Check against the very last table processed
-                is_redundant_final_text = self._is_text_segment_redundant_with_table(current_text_block_lines, last_processed_table_segment)
+            processed_segment = self._finalize_text_block(current_text_block_lines, last_processed_table_segment)
+            if processed_segment:
+                segments.append(processed_segment)
+                # No need to update last_processed_table_segment here as it's the end.
 
-            collected_text_for_final_block = "\n".join(current_text_block_lines).strip()
-            if collected_text_for_final_block: # Ensure not adding an empty string
-                if not is_redundant_final_text:
-                    segments.append({'type': 'text', 'content': collected_text_for_final_block})
-                    print(f"DEBUG: _format_ai_response_V2: Added FINAL TEXT segment: '{{collected_text_for_final_block[:50]}}...'")
-                else:
-                    print(f"DEBUG: Suppressed redundant FINAL text block: '{{collected_text_for_final_block[:50]}}...'")
-
+        # Debug print for the final list of segments
+        print(f"DEBUG: _format_ai_response: RETURNING segments (count {len(segments)}): {[s['type'] for s in segments]}") # Log segment types
         return segments
 
     def clean_cell_content(cell_text):
