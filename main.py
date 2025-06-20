@@ -1183,11 +1183,30 @@ class ComponentComparatorAI:
             doc.add_paragraph(f"AI Model (last used): {model_name_to_log}")
             doc.add_paragraph("-" * 20)
 
-            for entry_idx, entry_text in enumerate(self.conversation_log):
-                if not entry_text.strip():
-                    continue # Skip empty/whitespace-only log entries
+            for entry_data in self.conversation_log: # Renamed loop variable
+                entry_role = None
+                entry_content = None
 
-                segments = self._format_ai_response(entry_text)
+                if isinstance(entry_data, dict):
+                    entry_role = entry_data.get('role', 'system')
+                    entry_content = entry_data.get('content', '')
+                elif isinstance(entry_data, str):
+                    entry_role = 'system'
+                    entry_content = entry_data
+                    print(f"DEBUG: Download History - Found string entry in log: '{entry_data[:100]}...'. Processing with role '{entry_role}'.")
+                else:
+                    print(f"DEBUG: Download History - Skipping unknown entry type in log: {type(entry_data)}")
+                    continue
+
+                if not isinstance(entry_content, str):
+                    entry_content = str(entry_content if entry_content is not None else '')
+
+                text_color = color_map.get(entry_role, DEFAULT_COLOR)
+
+                if not entry_content.strip(): # Skip effectively empty entries (after potential conversion)
+                    continue
+
+                segments = self._format_ai_response(entry_content)
 
                 if segments:
                     for segment_idx, segment in enumerate(segments):
@@ -1202,29 +1221,37 @@ class ComponentComparatorAI:
                                 word_table = doc.add_table(rows=1, cols=num_cols)
                                 word_table.style = 'TableGrid'
                                 for col_idx, header_text_val in enumerate(headers):
-                                    word_table.cell(0, col_idx).text = str(header_text_val)
+                                    cell_run = word_table.cell(0, col_idx).paragraphs[0].add_run(str(header_text_val))
+                                    cell_run.font.color.rgb = text_color
                                 for data_row_list in data_rows:
                                     row_cells = word_table.add_row().cells
-                                    for col_idx, cell_content in enumerate(data_row_list):
+                                    for col_idx, cell_text_content in enumerate(data_row_list):
                                         if col_idx < num_cols:
-                                            row_cells[col_idx].text = str(cell_content)
+                                            cell_run = row_cells[col_idx].paragraphs[0].add_run(str(cell_text_content))
+                                            cell_run.font.color.rgb = text_color
                                 if segment_idx < len(segments) - 1:
                                     doc.add_paragraph('')
                             elif num_cols > 0 and not data_rows:
-                                doc.add_paragraph(f"[Table with headers: {', '.join(headers)}} - No data rows]")
+                                p = doc.add_paragraph()
+                                run = p.add_run(f"[Table with headers: {', '.join(headers)} - No data rows]")
+                                run.font.color.rgb = text_color
                                 if segment_idx < len(segments) - 1:
                                     doc.add_paragraph('')
 
                         elif segment_type == 'text':
-                            text_content = segment.get('content', '')
-                            if text_content.strip():
-                                doc.add_paragraph(text_content)
+                            current_text_content = segment.get('content', '')
+                            if current_text_content.strip():
+                                p = doc.add_paragraph()
+                                run = p.add_run(current_text_content)
+                                run.font.color.rgb = text_color
                                 if segment_idx < len(segments) - 1:
                                     doc.add_paragraph('')
 
-                elif entry_text.strip():
-                    doc.add_paragraph(f"[Unprocessed Entry]: {entry_text}")
-                    print(f"DEBUG: Download History - Entry resulted in no segments from _format_ai_response: {entry_text[:100]}...")
+                elif entry_content.strip():
+                    p = doc.add_paragraph()
+                    run = p.add_run(f"[Unprocessed Entry]: {entry_content}")
+                    run.font.color.rgb = ERROR_COLOR
+                    print(f"DEBUG: Download History - Entry was not processed into segments by _format_ai_response: {entry_content[:100]}...")
             doc.save(filepath)
             self.update_conversation_history(f"System: Conversation history downloaded to {filepath}", role="system")
 
