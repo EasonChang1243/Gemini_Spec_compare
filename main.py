@@ -2,6 +2,7 @@ import tkinter as tk
 from tkinter import ttk, scrolledtext, filedialog
 import fitz  # PyMuPDF, for PDF processing
 import re # For table formatting
+import json # For parsing JSON responses
 # Try to import specific fitz error, fall back if not found (e.g. older PyMuPDF)
 try:
     from fitz.errors import FitzError
@@ -250,26 +251,51 @@ class ComponentComparatorAI:
             "component1_type": "Unknown",
             "component2_type": "Unknown",
             "functionally_similar": "Unknown",
-            "is_similar_flag": False, # Default to False
+            "is_similar_flag": False,  # Default to False
             "mfg_pn1": "Not Found",
             "mfg_pn2": "Not Found"
         }
-        lines = response_text.split('\n')
-        for line in lines:
-            if line.startswith("Component1_Type:"):
-                data["component1_type"] = line.split(":", 1)[1].strip()
-            elif line.startswith("Component2_Type:"):
-                data["component2_type"] = line.split(":", 1)[1].strip()
-            elif line.startswith("Functionally_Similar:"):
-                similarity_text = line.split(":", 1)[1].strip()
-                data["functionally_similar"] = similarity_text
-                if similarity_text.lower().startswith("yes") or similarity_text.startswith("是"):
-                    data["is_similar_flag"] = True
-            elif line.startswith("MFG_PN1:"):
-                data["mfg_pn1"] = line.split(":", 1)[1].strip()
-            elif line.startswith("MFG_PN2:"):
-                data["mfg_pn2"] = line.split(":", 1)[1].strip()
+        try:
+            # Attempt to parse as JSON first
+            # Remove potential markdown backticks from JSON string
+            cleaned_response_text = response_text.strip()
+            if cleaned_response_text.startswith("```json"):
+                cleaned_response_text = cleaned_response_text[7:]
+            if cleaned_response_text.startswith("```"):
+                cleaned_response_text = cleaned_response_text[3:]
+            if cleaned_response_text.endswith("```"):
+                cleaned_response_text = cleaned_response_text[:-3]
 
+            parsed_json = json.loads(cleaned_response_text.strip())
+            data["component1_type"] = parsed_json.get("Component1_Type", "Unknown")
+            data["component2_type"] = parsed_json.get("Component2_Type", "Unknown")
+            similarity_text = parsed_json.get("Functionally_Similar", "Unknown")
+            data["functionally_similar"] = similarity_text
+            if isinstance(similarity_text, str) and (similarity_text.lower().startswith("yes") or similarity_text.startswith("是")):
+                data["is_similar_flag"] = True
+            data["mfg_pn1"] = parsed_json.get("MFG_PN1", "Not Found")
+            data["mfg_pn2"] = parsed_json.get("MFG_PN2", "Not Found")
+
+            # Ensure "Not Found" from JSON still results in empty string for P/N variables if needed by downstream logic
+            # (Current downstream logic in send_to_ai seems to handle "Not Found" correctly by setting P/N var to "" or the value)
+
+        except json.JSONDecodeError:
+            # Fallback to original line-by-line parsing if JSON parsing fails
+            lines = response_text.split('\n')
+            for line in lines:
+                if line.startswith("Component1_Type:"):
+                    data["component1_type"] = line.split(":", 1)[1].strip()
+                elif line.startswith("Component2_Type:"):
+                    data["component2_type"] = line.split(":", 1)[1].strip()
+                elif line.startswith("Functionally_Similar:"):
+                    similarity_text = line.split(":", 1)[1].strip()
+                    data["functionally_similar"] = similarity_text
+                    if similarity_text.lower().startswith("yes") or similarity_text.startswith("是"):
+                        data["is_similar_flag"] = True
+                elif line.startswith("MFG_PN1:"):
+                    data["mfg_pn1"] = line.split(":", 1)[1].strip()
+                elif line.startswith("MFG_PN2:"):
+                    data["mfg_pn2"] = line.split(":", 1)[1].strip()
         return data
 
     def on_upload_image(self):
