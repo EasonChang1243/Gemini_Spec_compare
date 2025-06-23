@@ -20,7 +20,9 @@ except ImportError:
 
 from PIL import Image, ImageTk, UnidentifiedImageError # Pillow for image handling
 import docx # For downloading history
+from docx.shared import RGBColor # For coloring text in Word
 from dotenv import load_dotenv # For loading .env files
+import traceback # For detailed error logging
 
 class Tooltip:
     """
@@ -401,84 +403,164 @@ class ComponentComparatorAI:
                 self.start_comparison_button.config(state=tk.NORMAL)
 
 
-    def _parse_markdown_table(self, markdown_text: str) -> dict or None:
+    def _parse_markdown_table(self, markdown_text: str) -> tuple[dict or None, int]:
         # Filter out empty lines and strip whitespace
-        lines = [line.strip() for line in markdown_text.splitlines() if line.strip()]
-        if not lines:
-            return None
+        # Keep track of original lines to count consumption accurately based on input structure
+        original_lines = markdown_text.splitlines()
+        processed_lines_info = [] # Stores (stripped_line_text, original_line_index)
 
-        header_line_index = -1
-        header_line_text = "" # Initialize to empty string
-        separator_line_index = -1
+        for original_idx, line_text in enumerate(original_lines):
+            stripped = line_text.strip()
+            if stripped: # Only consider non-empty lines for parsing logic
+                processed_lines_info.append({'text': stripped, 'original_index': original_idx})
+
+        if not processed_lines_info:
+            return None, 0
+
+        header_line_proc_index = -1 # Index in processed_lines_info
+        separator_line_proc_index = -1
         
-        # USE THIS REGEX:
         separator_pattern = r"^\s*\|(\s*[:\-]+\s*\|)*\s*[:\-]+\s*\|\s*$"
 
-        # Find header and separator lines
-        for i, current_line_text in enumerate(lines):
+        # Find header and separator lines using processed_lines_info
+        for i, current_line_info in enumerate(processed_lines_info):
+            current_line_text = current_line_info['text']
             if not current_line_text.startswith('|') or not current_line_text.endswith('|'):
                 continue
-            # A header line must have at least one column, meaning at least 2 pipes.
             if current_line_text.count('|') < 2: 
                 continue
 
-            if (i + 1) < len(lines):
-                next_line_text = lines[i+1].strip() # Ensure next_line is also stripped, though it should be from initial list comprehension
+            if (i + 1) < len(processed_lines_info):
+                next_line_info = processed_lines_info[i+1]
+                next_line_text = next_line_info['text']
                 if re.fullmatch(separator_pattern, next_line_text):
-                    # Validate that the number of segments in separator matches number of headers
                     temp_headers = [h.strip() for h in current_line_text[1:-1].split('|')]
                     num_header_cols = len(temp_headers)
-
-                    # The separator line, if matched by the regex, is guaranteed to start and end with '|'.
-                    # So, the number of columns it defines is count_of_pipes - 1.
                     num_separator_cols = next_line_text.count('|') - 1
                     
-                    if num_header_cols == num_separator_cols and num_header_cols > 0: # Ensure at least one column
-                        header_line_index = i
-                        header_line_text = current_line_text
-                        separator_line_index = i + 1
+                    if num_header_cols == num_separator_cols and num_header_cols > 0:
+                        header_line_proc_index = i
+                        separator_line_proc_index = i + 1
                         break
         
-        if header_line_index == -1: # No valid header and separator pair found
-            return None
+        if header_line_proc_index == -1:
+            return None, 0
 
-        headers = [h.strip() for h in header_line_text[1:-1].split('|')]
+        header_text_from_processed = processed_lines_info[header_line_proc_index]['text']
+        headers = [h.strip() for h in header_text_from_processed[1:-1].split('|')]
         num_cols = len(headers)
-        # num_cols will be > 0 due to the num_header_cols > 0 check above.
 
         table_rows_data = []
-        # Process rows after the separator line
-        for i in range(separator_line_index + 1, len(lines)):
-            current_row_text = lines[i].strip() # Ensure row text is stripped, though it should be
-            if current_row_text.startswith('|') and current_row_text.endswith('|'):
-                # A row must have num_cols + 1 pipes to match the header structure.
-                if current_row_text.count('|') != num_cols + 1:
-                    # If pipe count doesn't match, assume end of table or a malformed row that doesn't fit.
-                    break 
+        last_processed_row_proc_index = separator_line_proc_index
 
+        # Process rows after the separator line, using processed_lines_info
+        for i in range(separator_line_proc_index + 1, len(processed_lines_info)):
+            current_row_info = processed_lines_info[i]
+            current_row_text = current_row_info['text']
+
+            if current_row_text.startswith('|') and current_row_text.endswith('|'):
+                if current_row_text.count('|') != num_cols + 1:
+                    break 
                 cells = [cell.strip() for cell in current_row_text[1:-1].split('|')]
-                
-                # Cell padding/truncating logic (ensure it's robust if cells has unexpected length vs num_cols)
-                # Given the strict pipe check above, len(cells) should exactly match num_cols here.
-                # If the pipe check `current_row_text.count('|') != num_cols + 1` is removed or relaxed,
-                # then padding/truncation becomes critical.
-                # For now, assuming cells will have num_cols elements due to the pipe count check.
                 if len(cells) == num_cols:
                      table_rows_data.append(cells)
-                else:
-                    # This case should ideally not be reached if the pipe count check is active and correct.
-                    # If it is reached, it implies a mismatch despite pipe count, or pipe check is flawed.
-                    # Pad or truncate as a fallback.
-                    if len(cells) < num_cols:
-                        cells.extend([""] * (num_cols - len(cells)))
-                    else: # len(cells) > num_cols
-                        cells = cells[:num_cols]
+                else: # Fallback for mismatched cell count (should be rare with pipe check)
+                    if len(cells) < num_cols: cells.extend([""] * (num_cols - len(cells)))
+                    else: cells = cells[:num_cols]
                     table_rows_data.append(cells)
+                last_processed_row_proc_index = i # Update index of the last successfully processed row
             else:
-                # Line is not part of the table
                 break
-                
-        return {'type': 'table', 'headers': headers, 'rows': table_rows_data}
+
+        # Determine lines consumed from the original input string
+        # The table ends at the original line index of the last processed row (header, separator, or data row)
+        # If no rows, table ends at separator. If rows, table ends at last data row.
+        # The number of lines consumed is the original_index of the last part of the table + 1
+        # (because original_index is 0-based).
+
+        # If table_rows_data is not empty, the table consumed lines up to the last data row.
+        # The index in processed_lines_info for this last data row is `last_processed_row_proc_index`.
+        # If table_rows_data is empty, the table consumed lines up to the separator line.
+        # The index in processed_lines_info for the separator is `separator_line_proc_index`.
+
+        # `last_processed_row_proc_index` is initialized to `separator_line_proc_index`
+        # and updated if any data rows are found and processed.
+        # So, `processed_lines_info[last_processed_row_proc_index]['original_index']` gives the
+        # 0-based index in the *original* `markdown_text.splitlines()` of the last line
+        # that is part of the parsed table.
+        lines_consumed_count = processed_lines_info[last_processed_row_proc_index]['original_index'] + 1
+
+        return {'type': 'table', 'headers': headers, 'rows': table_rows_data}, lines_consumed_count
+
+    def _parse_implicit_table(self, text_lines: list[str]) -> dict or None:
+        MIN_IMPLICIT_TABLE_ROWS = 2 # Minimum number of qualifying lines to form a table
+        # Regex to capture key and value parts. Allows for optional whitespace around colon.
+        # Key is group 1, Value is group 2.
+        # Key can be anything up to the colon. Value is everything after.
+        KEY_VALUE_SEPARATOR_PATTERN = re.compile(r"^\s*(.+?)\s*:\s*(.+)\s*$")
+
+        if not text_lines or len(text_lines) < MIN_IMPLICIT_TABLE_ROWS:
+            return None
+
+        parsed_rows_data = []
+        expected_num_value_cols = -1 # Undetermined initially
+
+        # Find the first valid line to determine column count and start the table
+        start_line_idx = -1
+        first_row_candidate = []
+
+        for idx, line in enumerate(text_lines):
+            line_stripped = line.strip()
+            if not line_stripped: # Skip blank lines between potential data lines
+                if start_line_idx != -1 and not parsed_rows_data: # Blank line before any valid rows collected after start
+                    start_line_idx = -1 # Reset start if a blank line interrupts before min rows
+                continue
+
+            match = KEY_VALUE_SEPARATOR_PATTERN.match(line_stripped)
+            if match:
+                key_part = match.group(1).strip()
+                value_part = match.group(2).strip()
+
+                # Split value_part by comma, trim spaces from each cell
+                value_cells = [v.strip() for v in value_part.split(',')]
+
+                if not value_cells or not value_cells[0]: # Value part must exist
+                    if start_line_idx != -1: # If we were already building a table
+                        break # Invalid line, stop table parsing here
+                    else: continue # Keep searching for a valid start line
+
+                current_row_values = [key_part] + value_cells
+                num_value_cols_this_line = len(value_cells)
+
+                if start_line_idx == -1: # This is the first valid line candidate
+                    start_line_idx = idx
+                    expected_num_value_cols = num_value_cols_this_line
+                    parsed_rows_data.append(current_row_values)
+                elif num_value_cols_this_line == expected_num_value_cols:
+                    # This line matches the expected column structure
+                    parsed_rows_data.append(current_row_values)
+                else:
+                    # Line does not match column structure, table ends here
+                    break
+            else:
+                # Line does not match "Key: Value" pattern.
+                if start_line_idx != -1: # If we were already building a table
+                    break # Non-matching line, stop table parsing here
+                # else: continue searching for a start line (handles leading non-matching lines)
+
+        if len(parsed_rows_data) >= MIN_IMPLICIT_TABLE_ROWS:
+            # Construct headers
+            headers = ["Parameter"]
+            for i in range(expected_num_value_cols):
+                # Using "Value {i+1}" but could be "Comp {i+1}" etc. if context allows
+                headers.append(f"Value {i+1}")
+
+            # The number of lines consumed by this implicit table is tricky if there were interspersed blank lines
+            # or leading/trailing non-matching lines. For now, this function doesn't return consumed lines.
+            # _format_ai_response will have to manage line consumption more carefully if this parser is used.
+            return {'type': 'table', 'headers': headers, 'rows': parsed_rows_data}
+
+        return None
 
     def _populate_comparison_treeview(self, ai_response_text: str):
         if hasattr(self, 'comparison_treeview'):
@@ -486,32 +568,40 @@ class ComponentComparatorAI:
         else: self.update_conversation_history("System: Treeview not found.", role="error"); return
         
         # Attempt to parse the response as a generic markdown table first
-        parsed_table_data = self._parse_markdown_table(ai_response_text)
+        # MODIFIED to handle tuple return from _parse_markdown_table
+        parsing_result = self._parse_markdown_table(ai_response_text)
+        parsed_table_data = None # Initialize
+        lines_consumed = 0 # Initialize
 
-        if not parsed_table_data or not parsed_table_data['rows']:
-            self.update_conversation_history("System: No table data parsed for Treeview or table is empty.", role="system")
+        if isinstance(parsing_result, tuple) and len(parsing_result) == 2:
+            parsed_table_data, lines_consumed = parsing_result # Unpack tuple
+        elif isinstance(parsing_result, dict):
+            # Fallback: if _parse_markdown_table somehow returned only a dict (older version or specific path)
+            parsed_table_data = parsing_result
+            print("DEBUG: _populate_comparison_treeview - _parse_markdown_table returned a dict directly.")
+        elif parsing_result is None:
+            # _parse_markdown_table returned None directly (e.g. if input was empty, or no table found which now returns (None,0))
+            # This specific None case might be less likely now with (None,0) return for "no table found"
+            print("DEBUG: _populate_comparison_treeview - _parse_markdown_table returned None directly.")
+        else:
+            # Unexpected return type
+            print(f"DEBUG: _populate_comparison_treeview - Unexpected return type from _parse_markdown_table: {type(parsing_result)}")
+
+        # Ensure parsed_table_data is a dict and has 'headers' and 'rows' keys before proceeding
+        if not parsed_table_data or not isinstance(parsed_table_data, dict) or \
+           not parsed_table_data.get('headers') or not parsed_table_data.get('rows'):
+            self.update_conversation_history("System: No valid table data parsed for Treeview or table is empty/malformed.", role="system")
             return
 
         pn1 = self.mfg_pn_var_1.get() or (os.path.basename(self.spec_sheet_1_path) if self.spec_sheet_1_path else "Comp 1")
         pn2 = self.mfg_pn_var_2.get() or (os.path.basename(self.spec_sheet_2_path) if self.spec_sheet_2_path else "Comp 2")
         
-        # Adapt parsed_table_data for the existing treeview structure
-        # Assuming the table structure is Parameter | Comp1 Val | Comp2 Val | Notes
-        # Need to map headers to these roles if possible, or assume fixed column order for now
-        # For simplicity, let's assume the AI provides columns in the expected order for the treeview
+        headers = parsed_table_data.get('headers', []) # Use .get for safety
         
-        headers = parsed_table_data['headers']
-        # Update treeview column headings if they are generic enough or map them
-        # For now, we'll keep the original treeview headings and map data
-        # self.comparison_treeview.heading("parameter", text=headers[0] if len(headers) > 0 else "Parameter")
-        # self.comparison_treeview.heading("component1", text=headers[1] if len(headers) > 1 else pn1)
-        # self.comparison_treeview.heading("component2", text=headers[2] if len(headers) > 2 else pn2)
-        # self.comparison_treeview.heading("notes", text=headers[3] if len(headers) > 3 else "Notes")
-
         self.comparison_treeview.heading("component1", text=f"{pn1[:25]}{'...' if len(pn1)>25 else ''}")
         self.comparison_treeview.heading("component2", text=f"{pn2[:25]}{'...' if len(pn2)>25 else ''}")
 
-        for row_data in parsed_table_data['rows']:
+        for row_data in parsed_table_data.get('rows', []): # Use .get for safety
             # Map row_data list to the tuple expected by treeview.insert
             # (parameter, component1_val, component2_val, notes)
             parameter = row_data[0] if len(row_data) > 0 else ""
@@ -546,44 +636,29 @@ class ComponentComparatorAI:
 
     
     def _is_text_segment_redundant_with_table(self, text_lines: list[str], table_data: dict) -> bool:
-        MAX_LINES_FOR_REDUNDANCY_CHECK = 7  # Increased slightly
-        MIN_REDUNDANCY_THRESHOLD_PERCENT = 0.75 # General threshold
-        MIN_REDUNDANCY_FOR_SECTION_MATCH = 0.51 # Threshold if section header matches table parameter (more lenient for content)
+        MAX_LINES_FOR_REDUNDANCY_CHECK = 7
+        MIN_REDUNDANCY_THRESHOLD_PERCENT = 0.75
+        MIN_REDUNDANCY_FOR_SECTION_MATCH = 0.51
 
         actual_text_lines = [line for line in text_lines if line.strip()]
-        if not actual_text_lines: # No actual content
+        if not actual_text_lines:
             return False
 
-        # If the block is larger than check limit, but first line is a strong header match, still check the first few lines.
         is_potentially_headed_section = False
         first_line_normalized_for_header_check = actual_text_lines[0].strip().lower()
-        if (first_line_normalized_for_header_check.startswith('**') and first_line_normalized_for_header_check.endswith('**') and len(first_line_normalized_for_header_check) > 4) or \
-           (first_line_normalized_for_header_check.startswith('## ') and len(first_line_normalized_for_header_check) > 3):
+        if (first_line_normalized_for_header_check.startswith('**') and first_line_normalized_for_header_check.endswith('**') and len(first_line_normalized_for_header_check) > 4) or        (first_line_normalized_for_header_check.startswith('## ') and len(first_line_normalized_for_header_check) > 3):
             is_potentially_headed_section = True
 
         if not is_potentially_headed_section and len(actual_text_lines) > MAX_LINES_FOR_REDUNDANCY_CHECK:
-            return False # Too large and not a recognized headed section for this heuristic
+            return False
 
-        # If it's a headed section, take up to MAX_LINES_FOR_REDUNDANCY_CHECK for analysis
-        if is_potentially_headed_section and len(actual_text_lines) > MAX_LINES_FOR_REDUNDANCY_CHECK:
-            # This case is tricky. If a section starts with a matching header,
-            # but is very long, we might only want to suppress its short, redundant intro.
-            # For now, let's allow headed sections to be checked even if slightly longer,
-            # but the content check will be on lines_to_check_for_content.
-            # Or, we can truncate actual_text_lines for the check if it's a headed section.
-            # Let's stick to the original intent: check small blocks.
-            # If a headed section is too long, this heuristic won't make it redundant.
-            # This avoids suppressing large chunks of new analytical text.
-            pass # Allow longer headed sections to proceed to parameter matching, but content check is still on few lines.
-
-
-        table_headers_normalized = {str(h).strip().lower(): str(h).strip() for h in table_data.get('headers', [])} # Keep original case for potential later use
+        table_headers_normalized = {str(h).strip().lower(): str(h).strip() for h in table_data.get('headers', [])}
         table_all_cells_normalized_set = set()
         for row in table_data.get('rows', []):
             for cell in row:
                 table_all_cells_normalized_set.add(str(cell).strip().lower())
 
-        if not table_all_cells_normalized_set and not table_headers_normalized: # Empty table
+        if not table_all_cells_normalized_set and not table_headers_normalized:
             return False
 
         potential_section_title_normalized = None
@@ -595,16 +670,13 @@ class ComponentComparatorAI:
             potential_section_title_normalized = first_line_orig_case[3:].strip().lower()
 
         lines_to_check_for_content = actual_text_lines
-        # This set will contain specific cell values related to the matched parameter
         focused_table_content_normalized = None
         is_section_header_matched = False
 
         if potential_section_title_normalized:
-            # Check if section title matches a table column header
             if potential_section_title_normalized in table_headers_normalized:
                 is_section_header_matched = True
                 try:
-                    # Find column index of the matched header
                     col_idx = -1
                     for idx, header_val in enumerate(table_data.get('headers', [])):
                         if str(header_val).strip().lower() == potential_section_title_normalized:
@@ -612,55 +684,40 @@ class ComponentComparatorAI:
                             break
                     if col_idx != -1:
                         focused_table_content_normalized = {str(row[col_idx]).strip().lower() for row in table_data.get('rows', []) if len(row) > col_idx and str(row[col_idx]).strip()}
-                except Exception: # Broad catch for safety
-                    pass # Could not extract column data
-                lines_to_check_for_content = actual_text_lines[1:] # Content is lines after the header
+                except Exception:
+                    pass
+                lines_to_check_for_content = actual_text_lines[1:]
             else:
-                # Check if section title matches a parameter in the first column of any row
                 if table_data.get('rows') and len(table_data['rows'][0]) > 0:
                     for row_data in table_data.get('rows', []):
                         if str(row_data[0]).strip().lower() == potential_section_title_normalized:
                             is_section_header_matched = True
-                            # Content is the rest of the cells in that row
                             focused_table_content_normalized = {str(cell).strip().lower() for cell in row_data[1:] if str(cell).strip()}
                             lines_to_check_for_content = actual_text_lines[1:]
                             break
 
-        # If lines_to_check_for_content is empty after stripping header,
-        # and the header matched a table parameter, consider it redundant.
         if is_section_header_matched and not [line for line in lines_to_check_for_content if line.strip()]:
-            print(f"DEBUG: Text block (header only) '{{actual_text_lines[0]}}' matched table parameter and has no further content. Suppressing.")
-            return True
+            return True # Header matched, no content lines, considered redundant
 
-        # If after stripping header, the remaining lines exceed limit for non-headed section, don't suppress
         if len([line for line in lines_to_check_for_content if line.strip()]) > MAX_LINES_FOR_REDUNDANCY_CHECK and not is_section_header_matched:
              return False
 
-
         redundant_lines_count = 0
-        # Use focused content if available, otherwise broad check against all table cells
         comparison_basis_set = focused_table_content_normalized if focused_table_content_normalized is not None else table_all_cells_normalized_set
 
-        if not comparison_basis_set: # No specific content to compare against for this section/parameter
-            if is_section_header_matched : # Header matched but no values found for it (e.g. empty column/row)
-                 print(f"DEBUG: Section header '{{potential_section_title_normalized}}' matched table, but no specific table content to compare for its body. Not suppressing body based on this rule.")
-                 return False # Don't suppress if no specific content to compare with, unless it was header-only.
-            # Fall through to general check if no header was matched, using table_all_cells_normalized_set
+        if not comparison_basis_set:
+            if is_section_header_matched :
+                 return False
 
-
-        # Filter lines_to_check_for_content to only actual content lines and respect MAX_LINES for content part
         content_lines_for_final_check = [line for line in lines_to_check_for_content if line.strip()][:MAX_LINES_FOR_REDUNDANCY_CHECK]
-        if not content_lines_for_final_check: # No content lines to check
+        if not content_lines_for_final_check:
             return False
 
         for line_content in content_lines_for_final_check:
             normalized_line = line_content.strip().lower()
-            # Check 1: Exact match of the line in comparison_basis_set
             if normalized_line in comparison_basis_set:
                 redundant_lines_count += 1; continue
 
-            # Check 2: Substring check (line contains a table value, or a table value contains the line)
-            # This is a bit more generous.
             found_substring_match = False
             for table_val in comparison_basis_set:
                 if table_val and (table_val in normalized_line or normalized_line in table_val):
@@ -668,102 +725,98 @@ class ComponentComparatorAI:
             if found_substring_match:
                 redundant_lines_count += 1; continue
 
-            # Check 3: (Only if not a specific section match, i.e., general check) "key: value" type
-            if focused_table_content_normalized is None and ':' in normalized_line:
+            if focused_table_content_normalized is None and ':' in normalized_line: # Only do key:value check for general text
                 parts = normalized_line.split(':', 1)
                 if len(parts) == 2:
                     key_norm = parts[0].strip()
                     val_norm = parts[1].strip()
                     # Check if key is a table header and value is in any cell, or both in general cells
-                    if (key_norm in table_headers_normalized and val_norm in table_all_cells_normalized_set) or \
-                       (key_norm in table_all_cells_normalized_set and val_norm in table_all_cells_normalized_set):
+                    if (key_norm in table_headers_normalized and val_norm in table_all_cells_normalized_set) or                    (key_norm in table_all_cells_normalized_set and val_norm in table_all_cells_normalized_set):
                         redundant_lines_count += 1; continue
 
         current_threshold = MIN_REDUNDANCY_FOR_SECTION_MATCH if is_section_header_matched and focused_table_content_normalized is not None else MIN_REDUNDANCY_THRESHOLD_PERCENT
 
         if (float(redundant_lines_count) / len(content_lines_for_final_check)) >= current_threshold:
-            print(f"DEBUG: Text block identified as redundant. Lines checked: {{len(content_lines_for_final_check)}}, Redundant count: {{redundant_lines_count}}, Threshold: {{current_threshold}}, Header matched: {{is_section_header_matched}}")
             return True
 
         return False
 
+    def _finalize_text_block(self, block_lines: list[str], last_table_segment_for_redundancy_check: dict or None) -> dict or None:
+        if not [line for line in block_lines if line.strip()]:
+            return None
+
+        implicit_table = self._parse_implicit_table(block_lines)
+        if implicit_table:
+            # REMOVED: print(f"DEBUG: _finalize_text_block: Added IMPLICIT TABLE. Headers: {{implicit_table.get('headers')}}")
+            return implicit_table
+
+        collected_text = "\n".join(block_lines).strip()
+        if collected_text:
+            is_redundant = False
+            if last_table_segment_for_redundancy_check:
+                is_redundant = self._is_text_segment_redundant_with_table(block_lines, last_table_segment_for_redundancy_check)
+
+            if not is_redundant:
+                # REMOVED: print(f"DEBUG: _finalize_text_block: Added TEXT segment: '{{collected_text[:70]}}...'")
+                return {'type': 'text', 'content': collected_text}
+            else:
+                # REMOVED: print(f"DEBUG: _finalize_text_block: Suppressed redundant TEXT segment: '{{collected_text[:70]}}...'")
+                pass # Explicitly do nothing if text is redundant and suppressed
+        return None
+
     def _format_ai_response(self, text_response: str) -> list:
         segments = []
-        current_text_block_lines = []
+        current_text_block_lines = [] # Accumulates lines for a potential text or implicit table segment
         all_lines = text_response.splitlines()
         i = 0
-        last_processed_table_segment = None
+        last_processed_table_segment = None # For redundancy checks of text vs preceding table
 
         while i < len(all_lines):
-            line_to_process = all_lines[i]
+            # Check for a standard markdown (pipe) table starting at the current line
+            # _parse_markdown_table expects a single string, so we join lines from current position
+            pipe_table_data, lines_consumed_by_parser = self._parse_markdown_table("\n".join(all_lines[i:]))
 
-            # Attempt to parse a table starting from the current line 'i'
-            # Pass all_lines[i:] joined by newline to _parse_markdown_table
-            parsed_table_dict = self._parse_markdown_table("\n".join(all_lines[i:]))
-
-            if parsed_table_dict:
-                # Table found. Process any preceding text.
+            if pipe_table_data:
+                # A pipe table was found. First, finalize any text block accumulated *before* this pipe table.
                 if current_text_block_lines:
-                    is_redundant_pre_text = False
-                    if last_processed_table_segment: # Check against the table processed *before* current_text_block_lines
-                        is_redundant_pre_text = self._is_text_segment_redundant_with_table(current_text_block_lines, last_processed_table_segment)
+                    processed_segment = self._finalize_text_block(current_text_block_lines, last_processed_table_segment)
+                    if processed_segment:
+                        segments.append(processed_segment)
+                        if processed_segment['type'] == 'table': # This would be an implicit table
+                            last_processed_table_segment = processed_segment
+                    current_text_block_lines = [] # Reset buffer
 
-                    collected_text = "\n".join(current_text_block_lines).strip()
-                    if collected_text:
-                        if not is_redundant_pre_text:
-                            segments.append({'type': 'text', 'content': collected_text})
-                            print(f"DEBUG: _format_ai_response_V2: Added PRECEDING TEXT segment: '{{collected_text[:50]}}...'")
-                        else:
-                            print(f"DEBUG: Suppressed redundant PRECEDING text block: '{{collected_text[:50]}}...'")
-                    current_text_block_lines = []
+                # Now, add the pipe table itself
+                segments.append(pipe_table_data)
+                last_processed_table_segment = pipe_table_data # Update for next redundancy checks
                 
-                # Add the newly parsed table
-                segments.append(parsed_table_dict)
-                last_processed_table_segment = parsed_table_dict # Update with the latest table
+                # Use the accurate lines_consumed_by_parser from the parsing method
+                # REMOVED: print(f"DEBUG: _format_ai_response: Added PIPE TABLE segment. Headers: {pipe_table_data.get('headers')}, Consumed: {lines_consumed_by_parser} lines")
+                i += lines_consumed_by_parser # Advance 'i' by the number of lines consumed by the table parser
 
-                # Calculate lines consumed by this table to advance 'i'
-                if parsed_table_dict.get('rows') is not None:
-                    lines_consumed_by_table = len(parsed_table_dict['rows']) + 2 # +2 for header and separator
-                else:
-                    lines_consumed_by_table = 2 # Only header and separator
-                print(f"DEBUG: _format_ai_response_V2: Added TABLE segment. Headers: {{parsed_table_dict.get('headers')}}, Consumed approx: {{lines_consumed_by_table}} lines")
-                i += lines_consumed_by_table # Advance i past the processed table lines
+            else: # No pipe table starts at all_lines[i]
+                line = all_lines[i]
+                if not line.strip(): # Current line is blank, signifies end of a text block
+                    if current_text_block_lines:
+                        processed_segment = self._finalize_text_block(current_text_block_lines, last_processed_table_segment)
+                        if processed_segment:
+                            segments.append(processed_segment)
+                            if processed_segment['type'] == 'table': # Implicit table
+                                last_processed_table_segment = processed_segment
+                        current_text_block_lines = [] # Reset buffer
+                else: # Non-blank line, add to current text block
+                    current_text_block_lines.append(line)
+                i += 1 # Move to the next line
 
-            else: # Line is not part of a new table
-                if not line_to_process.strip(): # Current line is blank, indicating a potential sub-segment break
-                    if current_text_block_lines: # Process accumulated lines as a sub-segment
-                        is_redundant_sub_segment = False
-                        if last_processed_table_segment: # Check against the last table seen
-                            is_redundant_sub_segment = self._is_text_segment_redundant_with_table(current_text_block_lines, last_processed_table_segment)
-
-                        collected_sub_segment_text = "\n".join(current_text_block_lines).strip()
-                        if collected_sub_segment_text:
-                            if not is_redundant_sub_segment:
-                                segments.append({'type': 'text', 'content': collected_sub_segment_text})
-                                print(f"DEBUG: _format_ai_response_V2: Added TEXT sub-segment (due to blank line): '{{collected_sub_segment_text[:50]}}...'")
-                            else:
-                                print(f"DEBUG: Suppressed redundant TEXT sub-segment (due to blank line): '{{collected_sub_segment_text[:50]}}...'")
-                        current_text_block_lines = [] # Reset for the next block
-                    # The blank line itself is not added to current_text_block_lines or segments
-                else: # Current line is not blank
-                    current_text_block_lines.append(line_to_process) # Add to current block
-
-                i += 1 # Advance to the next line
-
-        # After the loop, process any remaining lines in current_text_block_lines (final block)
+        # After the loop, finalize any remaining lines in current_text_block_lines
         if current_text_block_lines:
-            is_redundant_final_text = False
-            if last_processed_table_segment: # Check against the very last table processed
-                is_redundant_final_text = self._is_text_segment_redundant_with_table(current_text_block_lines, last_processed_table_segment)
+            processed_segment = self._finalize_text_block(current_text_block_lines, last_processed_table_segment)
+            if processed_segment:
+                segments.append(processed_segment)
+                # No need to update last_processed_table_segment here as it's the end.
 
-            collected_text_for_final_block = "\n".join(current_text_block_lines).strip()
-            if collected_text_for_final_block: # Ensure not adding an empty string
-                if not is_redundant_final_text:
-                    segments.append({'type': 'text', 'content': collected_text_for_final_block})
-                    print(f"DEBUG: _format_ai_response_V2: Added FINAL TEXT segment: '{{collected_text_for_final_block[:50]}}...'")
-                else:
-                    print(f"DEBUG: Suppressed redundant FINAL text block: '{{collected_text_for_final_block[:50]}}...'")
-
+        # Debug print for the final list of segments
+        # REMOVED: print(f"DEBUG: _format_ai_response: RETURNING segments (count {len(segments)}): {[s['type'] for s in segments]}") # Log segment types
         return segments
 
     def clean_cell_content(cell_text):
@@ -919,7 +972,7 @@ class ComponentComparatorAI:
             self.conversation_history.see(tk.END)
             self.conversation_history.config(state=tk.DISABLED)
         
-        self.conversation_log.append(raw_message_for_log)
+        self.conversation_log.append({'role': role, 'content': raw_message_for_log})
 
     def _update_ui_for_ai_status(self, api_key_configured=None, model_initialized=None):
         if not hasattr(self, 'send_button'): return
@@ -947,7 +1000,10 @@ class ComponentComparatorAI:
             self.update_conversation_history("System: Select a valid AI model.", role="system"); self._update_ui_for_ai_status(model_initialized=False); return
         previous_model_name = self.model.model_name if self.model else None
         is_diff_model = self.model and self.model.model_name != selected_model_name
-        is_first_select_with_history = not self.model and self.conversation_log and any(not log.startswith("System: Welcome!") for log in self.conversation_log)
+
+        is_first_select_with_history = not self.model and self.conversation_log and \
+            any(not (log.get('role') == 'system' and log.get('content', '').startswith("System: Welcome!")) for log in self.conversation_log)
+
         if is_diff_model or is_first_select_with_history:
             log_msg = f"System: Changing model";
             if previous_model_name: log_msg += f" from {previous_model_name}"
@@ -979,7 +1035,8 @@ class ComponentComparatorAI:
             self.update_conversation_history("System: Cannot init model - API key not set.", role="error"); self.model=None; self.chat_session=None; self._update_ui_for_ai_status(model_initialized=False); return False
         self.update_conversation_history(f"System: Initializing model: {model_name}...", role="system")
         try:
-            if not any("Generative AI configured successfully." in log for log in self.conversation_log): self.update_conversation_history("System: Generative AI configured successfully.", role="system")
+            if not any(isinstance(log, dict) and "Generative AI configured successfully." in log.get('content', '') for log in self.conversation_log):
+                self.update_conversation_history("System: Generative AI configured successfully.", role="system")
             self.model = genai.GenerativeModel(model_name); self.chat_session = None
             self.update_conversation_history(f"System: Successfully initialized model: {model_name}", role="system"); self._update_ui_for_ai_status(model_initialized=True); return True
         except Exception as e: self.model=None; self.chat_session=None; self.update_conversation_history(f"System: Error initializing model {model_name}: {e}", role="error"); self._update_ui_for_ai_status(model_initialized=False); return False
@@ -1071,19 +1128,152 @@ class ComponentComparatorAI:
         finally: self._update_ui_for_ai_status()
 
     def download_history(self):
-        if not self.conversation_log: self.update_conversation_history("System: History empty.", role="system"); return
-        try: filepath = filedialog.asksaveasfilename(defaultextension=".docx", filetypes=[("Word Document", "*.docx"), ("All Files", "*.*")], title="Save History")
-        except Exception as e: self.update_conversation_history(f"System: Error opening save dialog: {e}", role="error"); return
-        if not filepath: self.update_conversation_history("System: Download cancelled.", role="system"); return
+        # Ensure necessary imports are at the top of main.py:
+        # import os
+        # import docx
+        # from tkinter import filedialog # Already imported usually
+        # from docx.shared import RGBColor # Should be at top of main.py by now
+        # import traceback # Should be at top of main.py by now
+
+        if not self.conversation_log:
+            self.update_conversation_history("System: History empty. Nothing to download.", role="system")
+            return
+
         try:
-            doc = docx.Document(); doc.add_heading("Component Comparator AI Chat History", level=1)
-            if self.spec_sheet_1_path: doc.add_paragraph(f"Spec Sheet 1: {os.path.basename(self.spec_sheet_1_path)}")
-            if self.spec_sheet_2_path: doc.add_paragraph(f"Spec Sheet 2: {os.path.basename(self.spec_sheet_2_path)}")
-            model_name = self.model.model_name if self.model and hasattr(self.model, 'model_name') else "N/A"
-            doc.add_paragraph(f"AI Model (last used): {model_name}"); doc.add_paragraph("-" * 20)
-            for entry in self.conversation_log: doc.add_paragraph(entry)
-            doc.save(filepath); self.update_conversation_history(f"System: History downloaded to {filepath}", role="system")
-        except Exception as e: self.update_conversation_history(f"System: Error downloading: {e}", role="error"); print(f"Error saving .docx: {e}")
+            filepath = filedialog.asksaveasfilename(
+                defaultextension=".docx",
+                filetypes=[("Word Document", "*.docx"), ("All Files", "*.*")],
+                title="Save Conversation History"
+            )
+        except Exception as e:
+            self.update_conversation_history(f"System: Error opening save dialog: {e}", role="error")
+            return
+
+        if not filepath:
+            self.update_conversation_history("System: Download cancelled by user.", role="system")
+            return
+
+        try:
+            doc = docx.Document()
+            # RGBColor should be imported via `from docx.shared import RGBColor` at module level
+
+            doc.add_heading("Component Comparator AI Chat History", level=1)
+
+            USER_COLOR = RGBColor(0x00, 0x00, 0xFF)  # Blue
+            AI_COLOR = RGBColor(0x00, 0x80, 0x00)    # Green
+            SYSTEM_COLOR = RGBColor(0x80, 0x00, 0x80) # Purple
+            ERROR_COLOR = RGBColor(0xFF, 0x00, 0x00)   # Red
+            DEFAULT_COLOR = RGBColor(0x00, 0x00, 0x00) # Black
+
+            color_map = {
+                'user': USER_COLOR,
+                'ai': AI_COLOR,
+                'system': SYSTEM_COLOR,
+                'error': ERROR_COLOR
+            }
+
+            if self.spec_sheet_1_path:
+                p = doc.add_paragraph()
+                # os.path.basename needs `import os` at module level
+                run = p.add_run(f"Spec Sheet 1: {os.path.basename(self.spec_sheet_1_path)}")
+                run.font.color.rgb = SYSTEM_COLOR
+            if self.spec_sheet_2_path:
+                p = doc.add_paragraph()
+                run = p.add_run(f"Spec Sheet 2: {os.path.basename(self.spec_sheet_2_path)}")
+                run.font.color.rgb = SYSTEM_COLOR
+
+            model_name_to_log = "N/A"
+            if self.model and hasattr(self.model, 'model_name'):
+                model_name_to_log = self.model.model_name
+            p = doc.add_paragraph()
+            run = p.add_run(f"AI Model (last used): {model_name_to_log}")
+            run.font.color.rgb = SYSTEM_COLOR
+            doc.add_paragraph("-" * 20)
+
+            for entry_data in self.conversation_log:
+                # CRUCIAL DEBUG LOGGING TO VERIFY THIS VERSION IS RUNNING:
+                # print(f"DEBUG download_history (v3): Processing entry_data of type: {type(entry_data)}, content snippet: '{str(entry_data)[:150]}...'")
+
+                entry_role = None
+                entry_content = None
+
+                if isinstance(entry_data, dict):
+                    entry_role = entry_data.get('role', 'system')
+                    entry_content = entry_data.get('content', '')
+                elif isinstance(entry_data, str):
+                    entry_role = 'system'
+                    entry_content = entry_data
+                    # REMOVED: print(f"DEBUG download_history (v3): Handled string entry: '{entry_data[:100]}...'. Assigned role '{entry_role}'.")
+                else:
+                    # REMOVED: print(f"DEBUG download_history (v3): Skipping unknown entry type in log: {type(entry_data)}")
+                    continue
+
+                if entry_content is None:
+                    entry_content = ''
+
+                if not isinstance(entry_content, str):
+                    entry_content = str(entry_content)
+
+                text_color = color_map.get(entry_role, DEFAULT_COLOR)
+
+                if not entry_content.strip():
+                    continue
+
+                segments = self._format_ai_response(entry_content)
+
+                if segments:
+                    for segment_idx, segment in enumerate(segments):
+                        segment_type = segment.get('type')
+
+                        if segment_type == 'table':
+                            headers = segment.get('headers', [])
+                            data_rows = segment.get('rows', [])
+                            num_cols = len(headers)
+
+                            if num_cols > 0 and data_rows:
+                                word_table = doc.add_table(rows=1, cols=num_cols)
+                                word_table.style = 'TableGrid'
+                                for col_idx, header_text_val in enumerate(headers):
+                                    cell_run = word_table.cell(0, col_idx).paragraphs[0].add_run(str(header_text_val))
+                                    cell_run.font.color.rgb = text_color
+                                for data_row_list in data_rows:
+                                    row_cells = word_table.add_row().cells
+                                    for col_idx, cell_text_content in enumerate(data_row_list):
+                                        if col_idx < num_cols:
+                                            cell_run = row_cells[col_idx].paragraphs[0].add_run(str(cell_text_content))
+                                            cell_run.font.color.rgb = text_color
+                                if segment_idx < len(segments) - 1:
+                                    doc.add_paragraph('')
+                            elif num_cols > 0 and not data_rows:
+                                p = doc.add_paragraph()
+                                run = p.add_run(f"[Table with headers: {', '.join(headers)} - No data rows]")
+                                run.font.color.rgb = text_color
+                                if segment_idx < len(segments) - 1:
+                                    doc.add_paragraph('')
+
+                        elif segment_type == 'text':
+                            current_text_content = segment.get('content', '')
+                            if current_text_content.strip():
+                                p = doc.add_paragraph()
+                                run = p.add_run(current_text_content)
+                                run.font.color.rgb = text_color
+                                if segment_idx < len(segments) - 1:
+                                    doc.add_paragraph('')
+
+                elif entry_content.strip():
+                    p = doc.add_paragraph()
+                    run = p.add_run(f"[Unprocessed Entry - Role: {entry_role}]: {entry_content}")
+                    run.font.color.rgb = text_color
+                    # REMOVED: print(f"DEBUG: Download History (v3) - Entry was not processed into segments by _format_ai_response (Role: {entry_role}): {entry_content[:100]}...")
+
+            doc.save(filepath)
+            self.update_conversation_history(f"System: Conversation history downloaded to {filepath}", role="system")
+
+        except Exception as e:
+            # KEPT: This is important error logging
+            print(f"DEBUG: Error saving .docx history (v3): {e}\n{traceback.format_exc()}")
+            error_message = f"System: Error during history download: {e}"
+            self.update_conversation_history(error_message, role="error")
 
     def clear_all(self, clear_files=True):
         print(f"DEBUG: clear_all called with clear_files={clear_files}")
@@ -1314,3 +1504,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+[end of main.py]
