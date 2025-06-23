@@ -22,6 +22,7 @@ from PIL import Image, ImageTk, UnidentifiedImageError # Pillow for image handli
 import docx # For downloading history
 from docx.shared import RGBColor # For coloring text in Word
 from dotenv import load_dotenv # For loading .env files
+import traceback # For detailed error logging
 
 class Tooltip:
     """
