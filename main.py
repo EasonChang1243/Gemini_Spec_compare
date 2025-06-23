@@ -489,7 +489,7 @@ class ComponentComparatorAI:
         # 0-based index in the *original* `markdown_text.splitlines()` of the last line
         # that is part of the parsed table.
         lines_consumed_count = processed_lines_info[last_processed_row_proc_index]['original_index'] + 1
-                
+
         return {'type': 'table', 'headers': headers, 'rows': table_rows_data}, lines_consumed_count
 
     def _parse_implicit_table(self, text_lines: list[str]) -> dict or None:
@@ -568,32 +568,40 @@ class ComponentComparatorAI:
         else: self.update_conversation_history("System: Treeview not found.", role="error"); return
         
         # Attempt to parse the response as a generic markdown table first
-        parsed_table_data = self._parse_markdown_table(ai_response_text)
+        # MODIFIED to handle tuple return from _parse_markdown_table
+        parsing_result = self._parse_markdown_table(ai_response_text)
+        parsed_table_data = None # Initialize
+        lines_consumed = 0 # Initialize
 
-        if not parsed_table_data or not parsed_table_data['rows']:
-            self.update_conversation_history("System: No table data parsed for Treeview or table is empty.", role="system")
+        if isinstance(parsing_result, tuple) and len(parsing_result) == 2:
+            parsed_table_data, lines_consumed = parsing_result # Unpack tuple
+        elif isinstance(parsing_result, dict):
+            # Fallback: if _parse_markdown_table somehow returned only a dict (older version or specific path)
+            parsed_table_data = parsing_result
+            print("DEBUG: _populate_comparison_treeview - _parse_markdown_table returned a dict directly.")
+        elif parsing_result is None:
+            # _parse_markdown_table returned None directly (e.g. if input was empty, or no table found which now returns (None,0))
+            # This specific None case might be less likely now with (None,0) return for "no table found"
+            print("DEBUG: _populate_comparison_treeview - _parse_markdown_table returned None directly.")
+        else:
+            # Unexpected return type
+            print(f"DEBUG: _populate_comparison_treeview - Unexpected return type from _parse_markdown_table: {type(parsing_result)}")
+
+        # Ensure parsed_table_data is a dict and has 'headers' and 'rows' keys before proceeding
+        if not parsed_table_data or not isinstance(parsed_table_data, dict) or \
+           not parsed_table_data.get('headers') or not parsed_table_data.get('rows'):
+            self.update_conversation_history("System: No valid table data parsed for Treeview or table is empty/malformed.", role="system")
             return
 
         pn1 = self.mfg_pn_var_1.get() or (os.path.basename(self.spec_sheet_1_path) if self.spec_sheet_1_path else "Comp 1")
         pn2 = self.mfg_pn_var_2.get() or (os.path.basename(self.spec_sheet_2_path) if self.spec_sheet_2_path else "Comp 2")
         
-        # Adapt parsed_table_data for the existing treeview structure
-        # Assuming the table structure is Parameter | Comp1 Val | Comp2 Val | Notes
-        # Need to map headers to these roles if possible, or assume fixed column order for now
-        # For simplicity, let's assume the AI provides columns in the expected order for the treeview
+        headers = parsed_table_data.get('headers', []) # Use .get for safety
         
-        headers = parsed_table_data['headers']
-        # Update treeview column headings if they are generic enough or map them
-        # For now, we'll keep the original treeview headings and map data
-        # self.comparison_treeview.heading("parameter", text=headers[0] if len(headers) > 0 else "Parameter")
-        # self.comparison_treeview.heading("component1", text=headers[1] if len(headers) > 1 else pn1)
-        # self.comparison_treeview.heading("component2", text=headers[2] if len(headers) > 2 else pn2)
-        # self.comparison_treeview.heading("notes", text=headers[3] if len(headers) > 3 else "Notes")
-
         self.comparison_treeview.heading("component1", text=f"{pn1[:25]}{'...' if len(pn1)>25 else ''}")
         self.comparison_treeview.heading("component2", text=f"{pn2[:25]}{'...' if len(pn2)>25 else ''}")
 
-        for row_data in parsed_table_data['rows']:
+        for row_data in parsed_table_data.get('rows', []): # Use .get for safety
             # Map row_data list to the tuple expected by treeview.insert
             # (parameter, component1_val, component2_val, notes)
             parameter = row_data[0] if len(row_data) > 0 else ""
