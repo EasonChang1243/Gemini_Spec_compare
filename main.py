@@ -403,84 +403,94 @@ class ComponentComparatorAI:
                 self.start_comparison_button.config(state=tk.NORMAL)
 
 
-    def _parse_markdown_table(self, markdown_text: str) -> dict or None:
+    def _parse_markdown_table(self, markdown_text: str) -> tuple[dict or None, int]:
         # Filter out empty lines and strip whitespace
-        lines = [line.strip() for line in markdown_text.splitlines() if line.strip()]
-        if not lines:
-            return None
+        # Keep track of original lines to count consumption accurately based on input structure
+        original_lines = markdown_text.splitlines()
+        processed_lines_info = [] # Stores (stripped_line_text, original_line_index)
 
-        header_line_index = -1
-        header_line_text = "" # Initialize to empty string
-        separator_line_index = -1
+        for original_idx, line_text in enumerate(original_lines):
+            stripped = line_text.strip()
+            if stripped: # Only consider non-empty lines for parsing logic
+                processed_lines_info.append({'text': stripped, 'original_index': original_idx})
+
+        if not processed_lines_info:
+            return None, 0
+
+        header_line_proc_index = -1 # Index in processed_lines_info
+        separator_line_proc_index = -1
         
-        # USE THIS REGEX:
         separator_pattern = r"^\s*\|(\s*[:\-]+\s*\|)*\s*[:\-]+\s*\|\s*$"
 
-        # Find header and separator lines
-        for i, current_line_text in enumerate(lines):
+        # Find header and separator lines using processed_lines_info
+        for i, current_line_info in enumerate(processed_lines_info):
+            current_line_text = current_line_info['text']
             if not current_line_text.startswith('|') or not current_line_text.endswith('|'):
                 continue
-            # A header line must have at least one column, meaning at least 2 pipes.
             if current_line_text.count('|') < 2: 
                 continue
 
-            if (i + 1) < len(lines):
-                next_line_text = lines[i+1].strip() # Ensure next_line is also stripped, though it should be from initial list comprehension
+            if (i + 1) < len(processed_lines_info):
+                next_line_info = processed_lines_info[i+1]
+                next_line_text = next_line_info['text']
                 if re.fullmatch(separator_pattern, next_line_text):
-                    # Validate that the number of segments in separator matches number of headers
                     temp_headers = [h.strip() for h in current_line_text[1:-1].split('|')]
                     num_header_cols = len(temp_headers)
-
-                    # The separator line, if matched by the regex, is guaranteed to start and end with '|'.
-                    # So, the number of columns it defines is count_of_pipes - 1.
                     num_separator_cols = next_line_text.count('|') - 1
                     
-                    if num_header_cols == num_separator_cols and num_header_cols > 0: # Ensure at least one column
-                        header_line_index = i
-                        header_line_text = current_line_text
-                        separator_line_index = i + 1
+                    if num_header_cols == num_separator_cols and num_header_cols > 0:
+                        header_line_proc_index = i
+                        separator_line_proc_index = i + 1
                         break
         
-        if header_line_index == -1: # No valid header and separator pair found
-            return None
+        if header_line_proc_index == -1:
+            return None, 0
 
-        headers = [h.strip() for h in header_line_text[1:-1].split('|')]
+        header_text_from_processed = processed_lines_info[header_line_proc_index]['text']
+        headers = [h.strip() for h in header_text_from_processed[1:-1].split('|')]
         num_cols = len(headers)
-        # num_cols will be > 0 due to the num_header_cols > 0 check above.
 
         table_rows_data = []
-        # Process rows after the separator line
-        for i in range(separator_line_index + 1, len(lines)):
-            current_row_text = lines[i].strip() # Ensure row text is stripped, though it should be
-            if current_row_text.startswith('|') and current_row_text.endswith('|'):
-                # A row must have num_cols + 1 pipes to match the header structure.
-                if current_row_text.count('|') != num_cols + 1:
-                    # If pipe count doesn't match, assume end of table or a malformed row that doesn't fit.
-                    break 
+        last_processed_row_proc_index = separator_line_proc_index
 
+        # Process rows after the separator line, using processed_lines_info
+        for i in range(separator_line_proc_index + 1, len(processed_lines_info)):
+            current_row_info = processed_lines_info[i]
+            current_row_text = current_row_info['text']
+
+            if current_row_text.startswith('|') and current_row_text.endswith('|'):
+                if current_row_text.count('|') != num_cols + 1:
+                    break 
                 cells = [cell.strip() for cell in current_row_text[1:-1].split('|')]
-                
-                # Cell padding/truncating logic (ensure it's robust if cells has unexpected length vs num_cols)
-                # Given the strict pipe check above, len(cells) should exactly match num_cols here.
-                # If the pipe check `current_row_text.count('|') != num_cols + 1` is removed or relaxed,
-                # then padding/truncation becomes critical.
-                # For now, assuming cells will have num_cols elements due to the pipe count check.
                 if len(cells) == num_cols:
                      table_rows_data.append(cells)
-                else:
-                    # This case should ideally not be reached if the pipe count check is active and correct.
-                    # If it is reached, it implies a mismatch despite pipe count, or pipe check is flawed.
-                    # Pad or truncate as a fallback.
-                    if len(cells) < num_cols:
-                        cells.extend([""] * (num_cols - len(cells)))
-                    else: # len(cells) > num_cols
-                        cells = cells[:num_cols]
+                else: # Fallback for mismatched cell count (should be rare with pipe check)
+                    if len(cells) < num_cols: cells.extend([""] * (num_cols - len(cells)))
+                    else: cells = cells[:num_cols]
                     table_rows_data.append(cells)
+                last_processed_row_proc_index = i # Update index of the last successfully processed row
             else:
-                # Line is not part of the table
                 break
+
+        # Determine lines consumed from the original input string
+        # The table ends at the original line index of the last processed row (header, separator, or data row)
+        # If no rows, table ends at separator. If rows, table ends at last data row.
+        # The number of lines consumed is the original_index of the last part of the table + 1
+        # (because original_index is 0-based).
+
+        # If table_rows_data is not empty, the table consumed lines up to the last data row.
+        # The index in processed_lines_info for this last data row is `last_processed_row_proc_index`.
+        # If table_rows_data is empty, the table consumed lines up to the separator line.
+        # The index in processed_lines_info for the separator is `separator_line_proc_index`.
+
+        # `last_processed_row_proc_index` is initialized to `separator_line_proc_index`
+        # and updated if any data rows are found and processed.
+        # So, `processed_lines_info[last_processed_row_proc_index]['original_index']` gives the
+        # 0-based index in the *original* `markdown_text.splitlines()` of the last line
+        # that is part of the parsed table.
+        lines_consumed_count = processed_lines_info[last_processed_row_proc_index]['original_index'] + 1
                 
-        return {'type': 'table', 'headers': headers, 'rows': table_rows_data}
+        return {'type': 'table', 'headers': headers, 'rows': table_rows_data}, lines_consumed_count
 
     def _parse_implicit_table(self, text_lines: list[str]) -> dict or None:
         MIN_IMPLICIT_TABLE_ROWS = 2 # Minimum number of qualifying lines to form a table
@@ -618,44 +628,29 @@ class ComponentComparatorAI:
 
     
     def _is_text_segment_redundant_with_table(self, text_lines: list[str], table_data: dict) -> bool:
-        MAX_LINES_FOR_REDUNDANCY_CHECK = 7  # Increased slightly
-        MIN_REDUNDANCY_THRESHOLD_PERCENT = 0.75 # General threshold
-        MIN_REDUNDANCY_FOR_SECTION_MATCH = 0.51 # Threshold if section header matches table parameter (more lenient for content)
+        MAX_LINES_FOR_REDUNDANCY_CHECK = 7
+        MIN_REDUNDANCY_THRESHOLD_PERCENT = 0.75
+        MIN_REDUNDANCY_FOR_SECTION_MATCH = 0.51
 
         actual_text_lines = [line for line in text_lines if line.strip()]
-        if not actual_text_lines: # No actual content
+        if not actual_text_lines:
             return False
 
-        # If the block is larger than check limit, but first line is a strong header match, still check the first few lines.
         is_potentially_headed_section = False
         first_line_normalized_for_header_check = actual_text_lines[0].strip().lower()
-        if (first_line_normalized_for_header_check.startswith('**') and first_line_normalized_for_header_check.endswith('**') and len(first_line_normalized_for_header_check) > 4) or \
-           (first_line_normalized_for_header_check.startswith('## ') and len(first_line_normalized_for_header_check) > 3):
+        if (first_line_normalized_for_header_check.startswith('**') and first_line_normalized_for_header_check.endswith('**') and len(first_line_normalized_for_header_check) > 4) or        (first_line_normalized_for_header_check.startswith('## ') and len(first_line_normalized_for_header_check) > 3):
             is_potentially_headed_section = True
 
         if not is_potentially_headed_section and len(actual_text_lines) > MAX_LINES_FOR_REDUNDANCY_CHECK:
-            return False # Too large and not a recognized headed section for this heuristic
+            return False
 
-        # If it's a headed section, take up to MAX_LINES_FOR_REDUNDANCY_CHECK for analysis
-        if is_potentially_headed_section and len(actual_text_lines) > MAX_LINES_FOR_REDUNDANCY_CHECK:
-            # This case is tricky. If a section starts with a matching header,
-            # but is very long, we might only want to suppress its short, redundant intro.
-            # For now, let's allow headed sections to be checked even if slightly longer,
-            # but the content check will be on lines_to_check_for_content.
-            # Or, we can truncate actual_text_lines for the check if it's a headed section.
-            # Let's stick to the original intent: check small blocks.
-            # If a headed section is too long, this heuristic won't make it redundant.
-            # This avoids suppressing large chunks of new analytical text.
-            pass # Allow longer headed sections to proceed to parameter matching, but content check is still on few lines.
-
-
-        table_headers_normalized = {str(h).strip().lower(): str(h).strip() for h in table_data.get('headers', [])} # Keep original case for potential later use
+        table_headers_normalized = {str(h).strip().lower(): str(h).strip() for h in table_data.get('headers', [])}
         table_all_cells_normalized_set = set()
         for row in table_data.get('rows', []):
             for cell in row:
                 table_all_cells_normalized_set.add(str(cell).strip().lower())
 
-        if not table_all_cells_normalized_set and not table_headers_normalized: # Empty table
+        if not table_all_cells_normalized_set and not table_headers_normalized:
             return False
 
         potential_section_title_normalized = None
@@ -667,16 +662,13 @@ class ComponentComparatorAI:
             potential_section_title_normalized = first_line_orig_case[3:].strip().lower()
 
         lines_to_check_for_content = actual_text_lines
-        # This set will contain specific cell values related to the matched parameter
         focused_table_content_normalized = None
         is_section_header_matched = False
 
         if potential_section_title_normalized:
-            # Check if section title matches a table column header
             if potential_section_title_normalized in table_headers_normalized:
                 is_section_header_matched = True
                 try:
-                    # Find column index of the matched header
                     col_idx = -1
                     for idx, header_val in enumerate(table_data.get('headers', [])):
                         if str(header_val).strip().lower() == potential_section_title_normalized:
@@ -684,55 +676,40 @@ class ComponentComparatorAI:
                             break
                     if col_idx != -1:
                         focused_table_content_normalized = {str(row[col_idx]).strip().lower() for row in table_data.get('rows', []) if len(row) > col_idx and str(row[col_idx]).strip()}
-                except Exception: # Broad catch for safety
-                    pass # Could not extract column data
-                lines_to_check_for_content = actual_text_lines[1:] # Content is lines after the header
+                except Exception:
+                    pass
+                lines_to_check_for_content = actual_text_lines[1:]
             else:
-                # Check if section title matches a parameter in the first column of any row
                 if table_data.get('rows') and len(table_data['rows'][0]) > 0:
                     for row_data in table_data.get('rows', []):
                         if str(row_data[0]).strip().lower() == potential_section_title_normalized:
                             is_section_header_matched = True
-                            # Content is the rest of the cells in that row
                             focused_table_content_normalized = {str(cell).strip().lower() for cell in row_data[1:] if str(cell).strip()}
                             lines_to_check_for_content = actual_text_lines[1:]
                             break
 
-        # If lines_to_check_for_content is empty after stripping header,
-        # and the header matched a table parameter, consider it redundant.
         if is_section_header_matched and not [line for line in lines_to_check_for_content if line.strip()]:
-            print(f"DEBUG: Text block (header only) '{{actual_text_lines[0]}}' matched table parameter and has no further content. Suppressing.")
-            return True
+            return True # Header matched, no content lines, considered redundant
 
-        # If after stripping header, the remaining lines exceed limit for non-headed section, don't suppress
         if len([line for line in lines_to_check_for_content if line.strip()]) > MAX_LINES_FOR_REDUNDANCY_CHECK and not is_section_header_matched:
              return False
 
-
         redundant_lines_count = 0
-        # Use focused content if available, otherwise broad check against all table cells
         comparison_basis_set = focused_table_content_normalized if focused_table_content_normalized is not None else table_all_cells_normalized_set
 
-        if not comparison_basis_set: # No specific content to compare against for this section/parameter
-            if is_section_header_matched : # Header matched but no values found for it (e.g. empty column/row)
-                 print(f"DEBUG: Section header '{{potential_section_title_normalized}}' matched table, but no specific table content to compare for its body. Not suppressing body based on this rule.")
-                 return False # Don't suppress if no specific content to compare with, unless it was header-only.
-            # Fall through to general check if no header was matched, using table_all_cells_normalized_set
+        if not comparison_basis_set:
+            if is_section_header_matched :
+                 return False
 
-
-        # Filter lines_to_check_for_content to only actual content lines and respect MAX_LINES for content part
         content_lines_for_final_check = [line for line in lines_to_check_for_content if line.strip()][:MAX_LINES_FOR_REDUNDANCY_CHECK]
-        if not content_lines_for_final_check: # No content lines to check
+        if not content_lines_for_final_check:
             return False
 
         for line_content in content_lines_for_final_check:
             normalized_line = line_content.strip().lower()
-            # Check 1: Exact match of the line in comparison_basis_set
             if normalized_line in comparison_basis_set:
                 redundant_lines_count += 1; continue
 
-            # Check 2: Substring check (line contains a table value, or a table value contains the line)
-            # This is a bit more generous.
             found_substring_match = False
             for table_val in comparison_basis_set:
                 if table_val and (table_val in normalized_line or normalized_line in table_val):
@@ -740,53 +717,43 @@ class ComponentComparatorAI:
             if found_substring_match:
                 redundant_lines_count += 1; continue
 
-            # Check 3: (Only if not a specific section match, i.e., general check) "key: value" type
-            if focused_table_content_normalized is None and ':' in normalized_line:
+            if focused_table_content_normalized is None and ':' in normalized_line: # Only do key:value check for general text
                 parts = normalized_line.split(':', 1)
                 if len(parts) == 2:
                     key_norm = parts[0].strip()
                     val_norm = parts[1].strip()
                     # Check if key is a table header and value is in any cell, or both in general cells
-                    if (key_norm in table_headers_normalized and val_norm in table_all_cells_normalized_set) or \
-                       (key_norm in table_all_cells_normalized_set and val_norm in table_all_cells_normalized_set):
+                    if (key_norm in table_headers_normalized and val_norm in table_all_cells_normalized_set) or                    (key_norm in table_all_cells_normalized_set and val_norm in table_all_cells_normalized_set):
                         redundant_lines_count += 1; continue
 
         current_threshold = MIN_REDUNDANCY_FOR_SECTION_MATCH if is_section_header_matched and focused_table_content_normalized is not None else MIN_REDUNDANCY_THRESHOLD_PERCENT
 
         if (float(redundant_lines_count) / len(content_lines_for_final_check)) >= current_threshold:
-            print(f"DEBUG: Text block identified as redundant. Lines checked: {{len(content_lines_for_final_check)}}, Redundant count: {{redundant_lines_count}}, Threshold: {{current_threshold}}, Header matched: {{is_section_header_matched}}")
             return True
 
         return False
 
     def _finalize_text_block(self, block_lines: list[str], last_table_segment_for_redundancy_check: dict or None) -> dict or None:
-        if not [line for line in block_lines if line.strip()]: # Check if block_lines contains any non-whitespace lines
+        if not [line for line in block_lines if line.strip()]:
             return None
 
-        # Try parsing as an implicit table first
-        # Note: _parse_implicit_table expects a list of strings.
         implicit_table = self._parse_implicit_table(block_lines)
         if implicit_table:
-            # Optional: Could add a redundancy check for implicit_table against last_table_segment_for_redundancy_check
-            # For now, assume implicit tables are distinct enough or this check is too complex here.
-            # The main redundancy check (_is_text_segment_redundant_with_table) is designed for text vs table.
-            print(f"DEBUG: _finalize_text_block: Added IMPLICIT TABLE. Headers: {implicit_table.get('headers')}")
-            return implicit_table # This dict already includes {'type': 'table'}
+            # REMOVED: print(f"DEBUG: _finalize_text_block: Added IMPLICIT TABLE. Headers: {{implicit_table.get('headers')}}")
+            return implicit_table
 
-        # If not an implicit table, treat as a text segment
         collected_text = "\n".join(block_lines).strip()
-        if collected_text: # Ensure there's actual content
+        if collected_text:
             is_redundant = False
             if last_table_segment_for_redundancy_check:
-                # _is_text_segment_redundant_with_table expects list of lines for its text input
                 is_redundant = self._is_text_segment_redundant_with_table(block_lines, last_table_segment_for_redundancy_check)
 
             if not is_redundant:
-                print(f"DEBUG: _finalize_text_block: Added TEXT segment: '{collected_text[:70]}...'")
+                # REMOVED: print(f"DEBUG: _finalize_text_block: Added TEXT segment: '{{collected_text[:70]}}...'")
                 return {'type': 'text', 'content': collected_text}
             else:
-                # Suppressed text block due to redundancy
-                print(f"DEBUG: _finalize_text_block: Suppressed redundant TEXT segment: '{collected_text[:70]}...'")
+                # REMOVED: print(f"DEBUG: _finalize_text_block: Suppressed redundant TEXT segment: '{{collected_text[:70]}}...'")
+                pass # Explicitly do nothing if text is redundant and suppressed
         return None
 
     def _format_ai_response(self, text_response: str) -> list:
@@ -799,7 +766,7 @@ class ComponentComparatorAI:
         while i < len(all_lines):
             # Check for a standard markdown (pipe) table starting at the current line
             # _parse_markdown_table expects a single string, so we join lines from current position
-            pipe_table_data = self._parse_markdown_table("\n".join(all_lines[i:]))
+            pipe_table_data, lines_consumed_by_parser = self._parse_markdown_table("\n".join(all_lines[i:]))
 
             if pipe_table_data:
                 # A pipe table was found. First, finalize any text block accumulated *before* this pipe table.
@@ -815,10 +782,9 @@ class ComponentComparatorAI:
                 segments.append(pipe_table_data)
                 last_processed_table_segment = pipe_table_data # Update for next redundancy checks
                 
-                # Calculate lines consumed by this pipe_table for advancing 'i'
-                lines_consumed_by_pipe_table = len(pipe_table_data.get('rows', [])) + 2 # +2 for header and separator
-                print(f"DEBUG: _format_ai_response: Added PIPE TABLE segment. Headers: {pipe_table_data.get('headers')}, Consumed approx: {lines_consumed_by_pipe_table} lines")
-                i += lines_consumed_by_pipe_table
+                # Use the accurate lines_consumed_by_parser from the parsing method
+                # REMOVED: print(f"DEBUG: _format_ai_response: Added PIPE TABLE segment. Headers: {pipe_table_data.get('headers')}, Consumed: {lines_consumed_by_parser} lines")
+                i += lines_consumed_by_parser # Advance 'i' by the number of lines consumed by the table parser
 
             else: # No pipe table starts at all_lines[i]
                 line = all_lines[i]
@@ -842,7 +808,7 @@ class ComponentComparatorAI:
                 # No need to update last_processed_table_segment here as it's the end.
 
         # Debug print for the final list of segments
-        print(f"DEBUG: _format_ai_response: RETURNING segments (count {len(segments)}): {[s['type'] for s in segments]}") # Log segment types
+        # REMOVED: print(f"DEBUG: _format_ai_response: RETURNING segments (count {len(segments)}): {[s['type'] for s in segments]}") # Log segment types
         return segments
 
     def clean_cell_content(cell_text):
@@ -1530,7 +1496,5 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-[end of main.py]
 
 [end of main.py]
