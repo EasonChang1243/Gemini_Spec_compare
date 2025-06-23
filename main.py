@@ -998,7 +998,7 @@ class ComponentComparatorAI:
             self.conversation_history.see(tk.END)
             self.conversation_history.config(state=tk.DISABLED)
         
-        self.conversation_log.append({'role': role, 'content': raw_message_for_log}) # MODIFIED HERE
+        self.conversation_log.append({'role': role, 'content': raw_message_for_log})
 
     def _update_ui_for_ai_status(self, api_key_configured=None, model_initialized=None):
         if not hasattr(self, 'send_button'): return
@@ -1027,7 +1027,6 @@ class ComponentComparatorAI:
         previous_model_name = self.model.model_name if self.model else None
         is_diff_model = self.model and self.model.model_name != selected_model_name
 
-        # MODIFIED HERE
         is_first_select_with_history = not self.model and self.conversation_log and \
             any(not (log.get('role') == 'system' and log.get('content', '').startswith("System: Welcome!")) for log in self.conversation_log)
 
@@ -1062,7 +1061,6 @@ class ComponentComparatorAI:
             self.update_conversation_history("System: Cannot init model - API key not set.", role="error"); self.model=None; self.chat_session=None; self._update_ui_for_ai_status(model_initialized=False); return False
         self.update_conversation_history(f"System: Initializing model: {model_name}...", role="system")
         try:
-            # MODIFIED HERE
             if not any(isinstance(log, dict) and "Generative AI configured successfully." in log.get('content', '') for log in self.conversation_log):
                 self.update_conversation_history("System: Generative AI configured successfully.", role="system")
             self.model = genai.GenerativeModel(model_name); self.chat_session = None
@@ -1220,7 +1218,7 @@ class ComponentComparatorAI:
 
             for entry_data in self.conversation_log:
                 # CRUCIAL DEBUG LOGGING TO VERIFY THIS VERSION IS RUNNING:
-                print(f"DEBUG download_history (v3): Processing entry_data of type: {type(entry_data)}, content snippet: '{str(entry_data)[:150]}...'")
+                # print(f"DEBUG download_history (v3): Processing entry_data of type: {type(entry_data)}, content snippet: '{str(entry_data)[:150]}...'")
 
                 entry_role = None
                 entry_content = None
@@ -1231,9 +1229,9 @@ class ComponentComparatorAI:
                 elif isinstance(entry_data, str):
                     entry_role = 'system'
                     entry_content = entry_data
-                    print(f"DEBUG download_history (v3): Handled string entry: '{entry_data[:100]}...'. Assigned role '{entry_role}'.")
+                    # REMOVED: print(f"DEBUG download_history (v3): Handled string entry: '{entry_data[:100]}...'. Assigned role '{entry_role}'.")
                 else:
-                    print(f"DEBUG download_history (v3): Skipping unknown entry type in log: {type(entry_data)}")
+                    # REMOVED: print(f"DEBUG download_history (v3): Skipping unknown entry type in log: {type(entry_data)}")
                     continue
 
                 if entry_content is None:
@@ -1292,14 +1290,13 @@ class ComponentComparatorAI:
                     p = doc.add_paragraph()
                     run = p.add_run(f"[Unprocessed Entry - Role: {entry_role}]: {entry_content}")
                     run.font.color.rgb = text_color
-                    print(f"DEBUG: Download History (v3) - Entry was not processed into segments by _format_ai_response (Role: {entry_role}): {entry_content[:100]}...")
+                    # REMOVED: print(f"DEBUG: Download History (v3) - Entry was not processed into segments by _format_ai_response (Role: {entry_role}): {entry_content[:100]}...")
 
             doc.save(filepath)
             self.update_conversation_history(f"System: Conversation history downloaded to {filepath}", role="system")
 
         except Exception as e:
-            # Ensure traceback is imported at the top of main.py
-            # import traceback
+            # KEPT: This is important error logging
             print(f"DEBUG: Error saving .docx history (v3): {e}\n{traceback.format_exc()}")
             error_message = f"System: Error during history download: {e}"
             self.update_conversation_history(error_message, role="error")
@@ -1533,5 +1530,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+[end of main.py]
 
 [end of main.py]
